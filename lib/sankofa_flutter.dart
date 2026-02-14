@@ -33,7 +33,7 @@ class Sankofa {
   /// Initialize the SDK
   Future<void> init({
     required String apiKey,
-    String endpoint = 'http://localhost:8080/v1/track', // Verify this for prod!
+    String endpoint = 'http://localhost:8080/api/v1/track',
     bool debug = false,
   }) async {
     _apiKey = apiKey;
