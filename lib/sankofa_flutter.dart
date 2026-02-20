@@ -37,7 +37,7 @@ class Sankofa {
     bool debug = false,
   }) async {
     _apiKey = apiKey;
-    _endpoint = endpoint;
+    _endpoint = "$endpoint/api/v1/track";
     _debug = debug;
 
     await _loadAnonymousId();
