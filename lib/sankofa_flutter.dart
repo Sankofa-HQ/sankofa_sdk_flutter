@@ -5,8 +5,11 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:ui' as ui;
 
-import 'package:flutter/widgets.dart';
+import 'package:app_links/app_links.dart';
+import 'package:carrier_info/carrier_info.dart';
+import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:device_info_plus/device_info_plus.dart';
+import 'package:flutter/widgets.dart';
 import 'package:http/http.dart' as http;
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -31,6 +34,9 @@ class Sankofa with WidgetsBindingObserver {
   bool _debug = false;
   final Map<String, String> _defaultProperties = {};
 
+  late AppLinks _appLinks;
+  StreamSubscription<Uri>? _linkSubscription;
+
   final List<Map<String, dynamic>> _queue = [];
   Timer? _flushTimer;
   bool _isFlushing = false;
@@ -50,6 +56,8 @@ class Sankofa with WidgetsBindingObserver {
     await _loadAnonymousId();
     await _loadQueue();
     await _loadDefaultProperties();
+    await _updateNetworkProperties(); // Initial network check
+    _initDeepLinkListener(); // Start listening for UTMs
 
     // Start auto-flush timer
     _flushTimer = Timer.periodic(const Duration(seconds: 30), (_) => _flush());
@@ -60,7 +68,7 @@ class Sankofa with WidgetsBindingObserver {
     // Track an automatic "App Opened" event to trigger session logic
     await track('\$app_opened');
 
-    if (_debug) print('⚡ Sankofa initialized');
+    appPrint('⚡ Sankofa initialized');
   }
 
   @override
@@ -68,10 +76,10 @@ class Sankofa with WidgetsBindingObserver {
     super.didChangeAppLifecycleState(state);
 
     if (state == AppLifecycleState.resumed) {
-      if (_debug) print('🟢 App in Foreground');
+      appPrint('🟢 App in Foreground');
       track('\$app_foregrounded');
     } else if (state == AppLifecycleState.paused) {
-      if (_debug) print('🔴 App in Background - Forcing Emergency Flush');
+      appPrint('🔴 App in Background - Forcing Emergency Flush');
       track('\$app_backgrounded').then((_) {
         _flush();
       });
@@ -81,6 +89,68 @@ class Sankofa with WidgetsBindingObserver {
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _flushTimer?.cancel();
+    _linkSubscription?.cancel();
+  }
+
+  /// 🌐 Listen for Deep Links to capture UTM Marketing data
+  void _initDeepLinkListener() {
+    _appLinks = AppLinks();
+
+    _linkSubscription = _appLinks.uriLinkStream.listen((uri) {
+      appPrint('🔗 Deep Link Caught: $uri');
+
+      final queryParams = uri.queryParameters;
+      bool hasUtms = false;
+
+      // Extract standard marketing UTMs and attach them to the session
+      final utmKeys = [
+        'utm_source',
+        'utm_medium',
+        'utm_campaign',
+        'utm_term',
+        'utm_content',
+      ];
+
+      for (final key in utmKeys) {
+        if (queryParams.containsKey(key)) {
+          // Note: Mixpanel doesn't use the '\$' prefix for UTMs
+          _defaultProperties[key] = queryParams[key]!;
+          hasUtms = true;
+        }
+      }
+
+      // If we caught UTMs, immediately track a marketing event
+      if (hasUtms) {
+        track('\$campaign_details', queryParams);
+      }
+    });
+  }
+
+  /// 📡 Dynamic Network & Carrier Info
+  Future<void> _updateNetworkProperties() async {
+    try {
+      // Check Wi-Fi vs Cellular
+      final connectivityResult = await Connectivity().checkConnectivity();
+      _defaultProperties['\$wifi'] =
+          (connectivityResult == ConnectivityResult.wifi).toString();
+
+      // Check Telecom Carrier (MTN, Vodafone, etc.)
+      if (Platform.isAndroid) {
+        final carrierData = await CarrierInfo.getAndroidInfo();
+        if (carrierData != null && carrierData.telephonyInfo.isNotEmpty) {
+          final name = carrierData.telephonyInfo.first.carrierName;
+          _defaultProperties['\$carrier'] = name.isNotEmpty ? name : 'Unknown';
+        }
+      } else if (Platform.isIOS) {
+        final carrierData = await CarrierInfo.getIosInfo();
+        if (carrierData.carrierData.isNotEmpty) {
+          final name = carrierData.carrierData.first.carrierName;
+          _defaultProperties['\$carrier'] = name.isNotEmpty ? name : 'Unknown';
+        }
+      }
+    } catch (e) {
+      appPrint('⚠️ Could not load network info (Simulators often fail this)');
+    }
   }
 
   /// Identify a user (Link anonymous ID to User ID)
@@ -109,7 +179,7 @@ class Sankofa with WidgetsBindingObserver {
       };
       _queue.add(aliasEvent);
       await _persistQueue();
-      if (_debug) print('🔗 Identify: Aliasing $previousId -> $userId');
+      appPrint('🔗 Identify: Aliasing $previousId -> $userId');
     }
 
     _flush();
@@ -122,7 +192,7 @@ class Sankofa with WidgetsBindingObserver {
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove('sankofa_user_id');
     await prefs.setString(_kAnonIdKey, _anonymousId!);
-    if (_debug) print('🔄 Reset Identity: New AnonID $_anonymousId');
+    appPrint('🔄 Reset Identity: New AnonID $_anonymousId');
   }
 
   /// Set User Properties (People Profile)
@@ -138,7 +208,7 @@ class Sankofa with WidgetsBindingObserver {
     };
     _queue.add(profileEvent);
     await _persistQueue();
-    if (_debug) print('👤 People Set: $properties');
+    appPrint('👤 People Set: $properties');
     _flush();
   }
 
@@ -155,7 +225,7 @@ class Sankofa with WidgetsBindingObserver {
         (now - lastEventTime) > (_kSessionTimeoutMinutes * 60 * 1000)) {
       _sessionId = const Uuid().v4();
       await prefs.setString(_kSessionIdKey, _sessionId!);
-      if (_debug) print('🆕 New Session Started: $_sessionId');
+      appPrint('🆕 New Session Started: $_sessionId');
 
       // Optional: Auto-fire a Session Start event
       // _queue.add({... 'event_name': '\$session_started' ...});
@@ -171,12 +241,15 @@ class Sankofa with WidgetsBindingObserver {
     Map<String, dynamic>? properties,
   ]) async {
     if (_apiKey == null) {
-      if (_debug) print('❌ Sankofa not initialized');
+      appPrint('❌ Sankofa not initialized');
       return;
     }
 
     // 1. Validate and refresh the session before recording the event
     await _refreshSession();
+
+    // Refresh network state right before tracking (users turn wifi on/off)
+    await _updateNetworkProperties();
 
     final event = {
       'type': 'track',
@@ -190,17 +263,16 @@ class Sankofa with WidgetsBindingObserver {
       },
       'default_properties': _defaultProperties,
       'timestamp': DateTime.now().toIso8601String(),
-      'lib_version': 'flutter-0.1.0', // Bumped version
-      'message_id': const Uuid().v4(),
+      'lib_version': 'flutter-0.1.1', // Bumped version
+      'message_id': const Uuid().v4(), // Perfect for ClickHouse deduplication
     };
 
     _queue.add(event);
     await _persistQueue();
 
-    if (_debug)
-      print(
-        '📝 Tracked: $eventName (Session: ${_sessionId?.substring(0, 8)}...)',
-      );
+    appPrint(
+      '📝 Tracked: $eventName (Session: ${_sessionId?.substring(0, 8)}...)',
+    );
 
     if (_queue.length >= 10) _flush();
   }
@@ -225,7 +297,7 @@ class Sankofa with WidgetsBindingObserver {
         final List<dynamic> list = jsonDecode(jsonString);
         _queue.addAll(list.cast<Map<String, dynamic>>());
       } catch (e) {
-        if (_debug) print('❌ Failed to load queue: $e');
+        appPrint('❌ Failed to load queue: $e');
       }
     }
   }
@@ -280,7 +352,7 @@ class Sankofa with WidgetsBindingObserver {
       _defaultProperties['\$locale'] =
           '${locale.languageCode}_${locale.countryCode}';
     } catch (e) {
-      if (_debug) print('⚠️ Could not load locale');
+      appPrint('⚠️ Could not load locale');
     }
   }
 
@@ -312,14 +384,13 @@ class Sankofa with WidgetsBindingObserver {
         );
 
         if (res.statusCode != 200) {
-          if (_debug)
-            print('❌ Failed to send ${event['type']}: ${res.statusCode}');
+          appPrint('❌ Failed to send ${event['type']}: ${res.statusCode}');
           failedEvents.add(event); // Retry later
         } else {
-          if (_debug) print('✅ Sent ${event['type']}');
+          appPrint('✅ Sent ${event['type']}');
         }
       } catch (e) {
-        if (_debug) print('❌ Network error: $e');
+        appPrint('❌ Network error: $e');
         failedEvents.add(event);
       }
     }
@@ -328,5 +399,9 @@ class Sankofa with WidgetsBindingObserver {
     _queue.addAll(failedEvents);
     await _persistQueue();
     _isFlushing = false;
+  }
+
+  void appPrint(String value) {
+    if (_debug) debugPrint(value);
   }
 }

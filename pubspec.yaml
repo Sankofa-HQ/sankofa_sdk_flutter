@@ -9,6 +9,9 @@ environment:
 
 dependencies:
   device_info_plus: ^12.3.0
+  connectivity_plus: ^5.0.0
+  carrier_info: ^2.0.8
+  app_links: ^3.4.0
   flutter:
     sdk: flutter
   http: ^1.6.0
