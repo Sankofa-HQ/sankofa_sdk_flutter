@@ -3,7 +3,9 @@ library sankofa_flutter;
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:ui' as ui;
 
+import 'package:flutter/widgets.dart';
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:http/http.dart' as http;
 import 'package:package_info_plus/package_info_plus.dart';
@@ -12,8 +14,11 @@ import 'package:uuid/uuid.dart';
 
 const String _kQueueKey = 'sankofa_queue';
 const String _kAnonIdKey = 'sankofa_anon_id';
+const String _kSessionIdKey = 'sankofa_session_id';
+const String _kLastEventTimeKey = 'sankofa_last_event_time';
+const int _kSessionTimeoutMinutes = 30;
 
-class Sankofa {
+class Sankofa with WidgetsBindingObserver {
   static final Sankofa _instance = Sankofa._internal();
   static Sankofa get instance => _instance;
 
@@ -21,8 +26,10 @@ class Sankofa {
   String? _endpoint;
   String? _userId;
   String? _anonymousId;
+  String? _sessionId;
+
   bool _debug = false;
-  Map<String, String> _defaultProperties = {};
+  final Map<String, String> _defaultProperties = {};
 
   final List<Map<String, dynamic>> _queue = [];
   Timer? _flushTimer;
@@ -47,7 +54,33 @@ class Sankofa {
     // Start auto-flush timer
     _flushTimer = Timer.periodic(const Duration(seconds: 30), (_) => _flush());
 
+    // Register the SDK to listen to OS lifecycle changes
+    WidgetsBinding.instance.addObserver(this);
+
+    // Track an automatic "App Opened" event to trigger session logic
+    await track('\$app_opened');
+
     if (_debug) print('⚡ Sankofa initialized');
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+
+    if (state == AppLifecycleState.resumed) {
+      if (_debug) print('🟢 App in Foreground');
+      track('\$app_foregrounded');
+    } else if (state == AppLifecycleState.paused) {
+      if (_debug) print('🔴 App in Background - Forcing Emergency Flush');
+      track('\$app_backgrounded').then((_) {
+        _flush();
+      });
+    }
+  }
+
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _flushTimer?.cancel();
   }
 
   /// Identify a user (Link anonymous ID to User ID)
@@ -109,6 +142,29 @@ class Sankofa {
     _flush();
   }
 
+  /// 🧠 Core Session Management Logic
+  Future<void> _refreshSession() async {
+    final prefs = await SharedPreferences.getInstance();
+    final now = DateTime.now().millisecondsSinceEpoch;
+
+    _sessionId = prefs.getString(_kSessionIdKey);
+    final lastEventTime = prefs.getInt(_kLastEventTimeKey) ?? 0;
+
+    // If no session exists, or 30 minutes have passed since the LAST event
+    if (_sessionId == null ||
+        (now - lastEventTime) > (_kSessionTimeoutMinutes * 60 * 1000)) {
+      _sessionId = const Uuid().v4();
+      await prefs.setString(_kSessionIdKey, _sessionId!);
+      if (_debug) print('🆕 New Session Started: $_sessionId');
+
+      // Optional: Auto-fire a Session Start event
+      // _queue.add({... 'event_name': '\$session_started' ...});
+    }
+
+    // Always bump the last event time to keep the session alive
+    await prefs.setInt(_kLastEventTimeKey, now);
+  }
+
   /// Track an event
   Future<void> track(
     String eventName, [
@@ -119,28 +175,34 @@ class Sankofa {
       return;
     }
 
+    // 1. Validate and refresh the session before recording the event
+    await _refreshSession();
+
     final event = {
-      'type': 'track', // Internal discriminator
+      'type': 'track',
       'event_name': eventName,
-      'distinct_id': _userId ?? _anonymousId, // Changed to distinct_id
-      'properties':
-          properties?.map((key, value) => MapEntry(key, value.toString())) ??
-          {},
+      'distinct_id': _userId ?? _anonymousId,
+      'properties': {
+        // Inject Session ID into the root properties of every event
+        '\$session_id': _sessionId,
+        ...(properties?.map((key, value) => MapEntry(key, value.toString())) ??
+            {}),
+      },
       'default_properties': _defaultProperties,
       'timestamp': DateTime.now().toIso8601String(),
-      'lib_version': 'flutter-0.0.2',
+      'lib_version': 'flutter-0.1.0', // Bumped version
       'message_id': const Uuid().v4(),
     };
 
     _queue.add(event);
     await _persistQueue();
 
-    if (_debug) print('📝 Tracked: $eventName (Queue: ${_queue.length})');
+    if (_debug)
+      print(
+        '📝 Tracked: $eventName (Session: ${_sessionId?.substring(0, 8)}...)',
+      );
 
-    // If queue is large, flush immediately
-    if (_queue.length >= 10) {
-      _flush();
-    }
+    if (_queue.length >= 10) _flush();
   }
 
   /// Load or generate anonymous ID
@@ -174,24 +236,51 @@ class Sankofa {
     await prefs.setString(_kQueueKey, jsonEncode(_queue));
   }
 
-  /// Gather device info
+  /// 🌐 Gather rich tier-1 device info
   Future<void> _loadDefaultProperties() async {
     final plugin = DeviceInfoPlugin();
     final packageInfo = await PackageInfo.fromPlatform();
 
-    _defaultProperties['app_version'] = packageInfo.version;
-    _defaultProperties['build_number'] = packageInfo.buildNumber;
-    _defaultProperties['os'] = Platform.operatingSystem;
-    _defaultProperties['os_version'] = Platform.operatingSystemVersion;
+    // 1. App Info
+    _defaultProperties['\$app_version'] = packageInfo.version;
+    _defaultProperties['\$build_number'] = packageInfo.buildNumber;
 
+    // 2. OS Info
+    _defaultProperties['\$os'] = Platform.operatingSystem;
+    _defaultProperties['\$os_version'] = Platform.operatingSystemVersion;
+
+    // 3. Hardware Info
     if (Platform.isAndroid) {
       final android = await plugin.androidInfo;
-      _defaultProperties['device_model'] = android.model;
-      _defaultProperties['device_manufacturer'] = android.manufacturer;
+      _defaultProperties['\$device_model'] = android.model;
+      _defaultProperties['\$device_manufacturer'] = android.manufacturer;
+      _defaultProperties['\$is_simulator'] = (!android.isPhysicalDevice)
+          .toString();
     } else if (Platform.isIOS) {
       final ios = await plugin.iosInfo;
-      _defaultProperties['device_model'] = ios.model;
-      _defaultProperties['device_manufacturer'] = 'Apple';
+      _defaultProperties['\$device_model'] = ios.model;
+      _defaultProperties['\$device_manufacturer'] = 'Apple';
+      _defaultProperties['\$is_simulator'] = (!ios.isPhysicalDevice).toString();
+    }
+
+    // 4. Display Info (Safe access via PlatformDispatcher)
+    try {
+      final view = ui.PlatformDispatcher.instance.views.first;
+      _defaultProperties['\$screen_width'] = view.physicalSize.width.toString();
+      _defaultProperties['\$screen_height'] = view.physicalSize.height
+          .toString();
+    } catch (e) {
+      if (_debug) print('⚠️ Could not load screen dimensions');
+    }
+
+    // 5. Locale & Timezone Info
+    _defaultProperties['\$timezone'] = DateTime.now().timeZoneName;
+    try {
+      final locale = ui.PlatformDispatcher.instance.locale;
+      _defaultProperties['\$locale'] =
+          '${locale.languageCode}_${locale.countryCode}';
+    } catch (e) {
+      if (_debug) print('⚠️ Could not load locale');
     }
   }
 
