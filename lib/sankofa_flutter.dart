@@ -32,6 +32,7 @@ class Sankofa with WidgetsBindingObserver {
   String? _sessionId;
 
   bool _debug = false;
+  bool _trackLifecycleEvents = true;
   final Map<String, String> _defaultProperties = {};
 
   late AppLinks _appLinks;
@@ -48,10 +49,12 @@ class Sankofa with WidgetsBindingObserver {
     required String apiKey,
     String endpoint = 'http://localhost:8080',
     bool debug = false,
+    bool trackLifecycleEvents = true,
   }) async {
     _apiKey = apiKey;
     _endpoint = "$endpoint/api/v1/track";
     _debug = debug;
+    _trackLifecycleEvents = trackLifecycleEvents;
 
     await _loadAnonymousId();
     await _loadQueue();
@@ -66,7 +69,9 @@ class Sankofa with WidgetsBindingObserver {
     WidgetsBinding.instance.addObserver(this);
 
     // Track an automatic "App Opened" event to trigger session logic
-    await track('\$app_opened');
+    if (_trackLifecycleEvents) {
+      await track('\$app_opened');
+    }
 
     appPrint('⚡ Sankofa initialized');
   }
@@ -77,12 +82,19 @@ class Sankofa with WidgetsBindingObserver {
 
     if (state == AppLifecycleState.resumed) {
       appPrint('🟢 App in Foreground');
-      track('\$app_foregrounded');
+      if (_trackLifecycleEvents) {
+        track('\$app_foregrounded');
+      }
     } else if (state == AppLifecycleState.paused) {
       appPrint('🔴 App in Background - Forcing Emergency Flush');
-      track('\$app_backgrounded').then((_) {
+      if (_trackLifecycleEvents) {
+        track('\$app_backgrounded').then((_) {
+          _flush();
+        });
+      } else {
+        // Still force flush even if we aren't tracking the lifecycle event!
         _flush();
-      });
+      }
     }
   }
 
