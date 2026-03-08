@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
 import 'dart:ui' as ui;
 
@@ -7,7 +6,6 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:http/http.dart' as http;
-import 'package:shared_preferences/shared_preferences.dart';
 
 class SankofaReplay {
   static final SankofaReplay instance = SankofaReplay._internal();
@@ -43,6 +41,9 @@ class SankofaReplay {
     _sessionId = sessionId;
     _fps = fps;
     _isInit = true;
+    print(
+      '🎥 SankofaReplay: Initialized correctly with Session: $_sessionId and Endpoint: $_endpoint',
+    );
     _startRecording();
   }
 
@@ -67,7 +68,16 @@ class SankofaReplay {
       final boundary =
           _repaintBoundaryKey.currentContext!.findRenderObject()
               as RenderRepaintBoundary?;
-      if (boundary == null || boundary.debugNeedsPaint) return;
+      if (boundary == null) {
+        print('❌ SankofaReplay: Boundary is null');
+        return;
+      }
+      if (boundary.debugNeedsPaint) {
+        print(
+          '⚠️ SankofaReplay: Skipped frame because boundary needs paint (animation running?)',
+        );
+        return;
+      }
 
       final image = await boundary.toImage(
         pixelRatio: 1.0,
@@ -79,14 +89,19 @@ class SankofaReplay {
         final bytes = byteData.buffer.asUint8List();
         _frameBuffer.add(_ReplayFrame(DateTime.now(), bytes));
 
-        if (_frameBuffer.length >= 20) {
+        if (_frameBuffer.length % 5 == 0) {
+          print('📸 SankofaReplay: Buffered ${_frameBuffer.length} frames');
+        }
+
+        // Lower threshold to 5 frames (5 seconds) for easier MVP testing
+        if (_frameBuffer.length >= 5) {
           _flush();
         }
       }
     } catch (e) {
-      if (kDebugMode) {
-        print('SankofaReplay Error capturing frame: $e');
-      }
+      print(
+        '❌ SankofaReplay Error capturing frame so we skipped this tick: $e',
+      );
     }
   }
 
@@ -122,17 +137,14 @@ class SankofaReplay {
 
         final resp = await req.send();
         if (resp.statusCode == 200) {
+          print('🚀 SankofaReplay: Uploaded chunk $_chunkIndex successfully');
           _chunkIndex++;
         } else {
-          if (kDebugMode) {
-            print('SankofaReplay Chunk upload failed: ${resp.statusCode}');
-          }
+          print('❌ SankofaReplay: Chunk upload failed: ${resp.statusCode}');
         }
       }
     } catch (e) {
-      if (kDebugMode) {
-        print('SankofaReplay flush error: $e');
-      }
+      print('❌ SankofaReplay: flush error: $e');
     } finally {
       _isFlushing = false;
     }
