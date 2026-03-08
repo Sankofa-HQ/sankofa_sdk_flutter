@@ -14,6 +14,8 @@ class SankofaReplay {
 
   bool _isInit = false;
   bool _isRecording = false;
+  bool _isCapturingFrame =
+      false; // Add state to know *exactly* when we are painting for capture
   String _apiKey = '';
   String _endpoint = '';
   String _sessionId = '';
@@ -24,6 +26,9 @@ class SankofaReplay {
 
   // Provide this key to the root widget
   GlobalKey get rootBoundaryKey => _repaintBoundaryKey;
+
+  // Expose this for the Mask render object
+  bool get isCapturingFrame => _isCapturingFrame;
 
   final List<_ReplayFrame> _frameBuffer = [];
   int _chunkIndex = 0;
@@ -65,6 +70,11 @@ class SankofaReplay {
   Future<void> _captureFrame() async {
     if (_repaintBoundaryKey.currentContext == null) return;
 
+    _isCapturingFrame = true; // Signal to our custom painted masks
+    await Future.microtask(
+      () {},
+    ); // Let the event loop run so masks can mark needsPaint if we were doing State management, but RenderObjects paint synchronously on the UI thread when `toImage` is called. Actually, `toImage` forces a repaint layer if needed. For safety, we just set the flag.
+
     try {
       final boundary =
           _repaintBoundaryKey.currentContext!.findRenderObject()
@@ -104,6 +114,8 @@ class SankofaReplay {
       print(
         '❌ SankofaReplay Error capturing frame so we skipped this tick: $e',
       );
+    } finally {
+      _isCapturingFrame = false; // Always turn off the signal
     }
   }
 
@@ -199,18 +211,32 @@ class SankofaReplayBoundary extends StatelessWidget {
 
 /// A widget to mask sensitive information (like passwords or PII).
 /// It paints a solid black box over its child during a replay capture tick.
-class SankofaMask extends StatelessWidget {
-  final Widget child;
-
-  const SankofaMask({super.key, required this.child});
+class SankofaMask extends SingleChildRenderObjectWidget {
+  const SankofaMask({super.key, required Widget child}) : super(child: child);
 
   @override
-  Widget build(BuildContext context) {
-    // In actual implementation, this would detect if a capture is happening
-    // and replace the child with a black box. For MVP, we can return the child,
-    // or wrap it in a custom RenderObject that knows when to paint black.
-    // To keep it simple, we'll leave it as a pass-through for Phase 1.
-    return child;
+  RenderObject createRenderObject(BuildContext context) {
+    return _RenderSankofaMask();
+  }
+
+  @override
+  void updateRenderObject(
+    BuildContext context,
+    _RenderSankofaMask renderObject,
+  ) {}
+}
+
+class _RenderSankofaMask extends RenderProxyBox {
+  @override
+  void paint(PaintingContext context, Offset offset) {
+    if (SankofaReplay.instance.isCapturingFrame) {
+      // Paint a solid black rectangle over the child's bounds
+      final paint = Paint()..color = const Color(0xFF000000); // Solid Black
+      context.canvas.drawRect(offset & size, paint);
+    } else {
+      // Paint the child normally
+      super.paint(context, offset);
+    }
   }
 }
 
