@@ -81,8 +81,9 @@ class SankofaReplay {
       }
 
       final image = await boundary.toImage(
-        pixelRatio: 1.0,
-      ); // Keep ratio 1.0 to save space
+        pixelRatio:
+            0.5, // Crush the pixel ratio to vastly reduce B2 storage payload
+      );
       final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
       // Note: Flutter doesn't natively encode WebP. We'll use PNG, which gzip will compress well.
 
@@ -185,8 +186,7 @@ class _ReplayFrame {
 class SankofaReplayBoundary extends StatelessWidget {
   final Widget child;
 
-  const SankofaReplayBoundary({Key? key, required this.child})
-    : super(key: key);
+  const SankofaReplayBoundary({super.key, required this.child});
 
   @override
   Widget build(BuildContext context) {
@@ -202,7 +202,7 @@ class SankofaReplayBoundary extends StatelessWidget {
 class SankofaMask extends StatelessWidget {
   final Widget child;
 
-  const SankofaMask({Key? key, required this.child}) : super(key: key);
+  const SankofaMask({super.key, required this.child});
 
   @override
   Widget build(BuildContext context) {
