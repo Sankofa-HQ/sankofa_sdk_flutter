@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:ui' as ui;
 
@@ -109,42 +110,57 @@ class SankofaReplay {
     if (_isFlushing || _frameBuffer.isEmpty) return;
     _isFlushing = true;
 
+    // 1. Snapshot the queue and clear it to accept new frames while uploading
+    final framesToUpload = List.of(_frameBuffer);
+    _frameBuffer.clear();
+
     try {
-      final framesToUpload = List.of(_frameBuffer);
-      _frameBuffer.clear();
+      // 2. Build the JSON Batch Payload with precise timestamps
+      final List<Map<String, dynamic>> serializedFrames = framesToUpload.map((
+        f,
+      ) {
+        return {
+          'timestamp': f.timestamp.millisecondsSinceEpoch,
+          'image_base64': base64Encode(f.bytes),
+        };
+      }).toList();
 
-      // Encode frames as a very simple custom binary format for MVP:
-      // [8 bytes timestamp][N bytes PNG length][PNG bytes] ...
-      // But since we want to be simple, let's just upload the last frame per chunk for now,
-      // or concat them. For MVP of "video", a sequence of images is fine.
-      // Let's create a tar-like or simple prefixed format.
-      // Easiest is to just send the raw bytes of ONE image per chunk for testing, or JSON encode base64.
-      // Wait, the Go backend expects raw WebP/PNG byte array. So let's just send the first frame of the buffer for the chunk,
-      // or we can append them. Let's send them individually as chunks to fit the backend MVP perfectly.
+      final Map<String, dynamic> payload = {
+        'session_id': _sessionId,
+        'chunk_index': _chunkIndex,
+        'frames': serializedFrames,
+      };
 
-      for (var frame in framesToUpload) {
-        final compressed = GZipCodec().encode(frame.bytes);
+      // 3. Gzip the JSON directly on the device (Massive bandwidth saver)
+      final jsonString = jsonEncode(payload);
+      final compressedBody = GZipCodec().encode(utf8.encode(jsonString));
 
-        final uri = Uri.parse('$_endpoint/api/ee/replay/chunk');
+      // 4. Send ONE single HTTP Request
+      final uri = Uri.parse('$_endpoint/api/ee/replay/chunk');
+      final req = http.Request('POST', uri)
+        ..headers['x-api-key'] = _apiKey
+        ..headers['Content-Type'] = 'application/json'
+        ..headers['Content-Encoding'] = 'gzip'
+        ..headers['X-Session-Id'] = _sessionId
+        ..headers['X-Chunk-Index'] = _chunkIndex.toString()
+        ..bodyBytes = compressedBody;
 
-        final req = http.Request('POST', uri)
-          ..headers['x-api-key'] = _apiKey
-          ..headers['Content-Type'] = 'application/octet-stream'
-          ..headers['Content-Encoding'] = 'gzip'
-          ..headers['X-Session-Id'] = _sessionId
-          ..headers['X-Chunk-Index'] = _chunkIndex.toString()
-          ..bodyBytes = compressed;
+      final resp = await req.send();
 
-        final resp = await req.send();
-        if (resp.statusCode == 200) {
-          print('🚀 SankofaReplay: Uploaded chunk $_chunkIndex successfully');
-          _chunkIndex++;
-        } else {
-          print('❌ SankofaReplay: Chunk upload failed: ${resp.statusCode}');
-        }
+      if (resp.statusCode == 200) {
+        print(
+          '🚀 SankofaReplay: Uploaded chunk $_chunkIndex (${framesToUpload.length} frames)',
+        );
+        _chunkIndex++;
+      } else {
+        print('❌ SankofaReplay: Chunk upload failed: ${resp.statusCode}');
+        // 🛡️ CRITICAL: If upload fails (e.g., went into a tunnel), put frames back!
+        _frameBuffer.insertAll(0, framesToUpload);
       }
     } catch (e) {
       print('❌ SankofaReplay: flush error: $e');
+      // 🛡️ CRITICAL: Network crash fallback
+      _frameBuffer.insertAll(0, framesToUpload);
     } finally {
       _isFlushing = false;
     }
