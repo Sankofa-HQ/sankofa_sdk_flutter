@@ -15,6 +15,9 @@ import 'package:package_info_plus/package_info_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 
+import 'src/replay/sankofa_replay.dart';
+export 'src/replay/sankofa_replay.dart';
+
 const String _kQueueKey = 'sankofa_queue';
 const String _kAnonIdKey = 'sankofa_anon_id';
 const String _kSessionIdKey = 'sankofa_session_id';
@@ -73,7 +76,20 @@ class Sankofa with WidgetsBindingObserver {
       await track('\$app_opened');
     }
 
+    _initReplay();
     appPrint('⚡ Sankofa initialized');
+  }
+
+  void _initReplay() {
+    if (_apiKey != null && _endpoint != null && _sessionId != null) {
+      // The _endpoint is <baseUrl>/api/v1/track, we need just the base.
+      final baseUrl = _endpoint!.replaceAll('/api/v1/track', '');
+      SankofaReplay.instance.init(
+        apiKey: _apiKey!,
+        endpoint: baseUrl,
+        sessionId: _sessionId!,
+      );
+    }
   }
 
   @override
@@ -238,6 +254,7 @@ class Sankofa with WidgetsBindingObserver {
       _sessionId = const Uuid().v4();
       await prefs.setString(_kSessionIdKey, _sessionId!);
       appPrint('🆕 New Session Started: $_sessionId');
+      _initReplay(); // Restart replay with new session ID
 
       // Optional: Auto-fire a Session Start event
       // _queue.add({... 'event_name': '\$session_started' ...});
