@@ -22,6 +22,7 @@ class SankofaReplay {
   String _apiKey = '';
   String _endpoint = '';
   String _sessionId = '';
+  String _distinctId = 'anonymous';
   SankofaReplayMode _mode = SankofaReplayMode.wireframe;
   int _fps = 1;
   Timer? _captureTimer;
@@ -51,6 +52,7 @@ class SankofaReplay {
     required String apiKey,
     required String endpoint,
     required String sessionId,
+    String distinctId = 'anonymous',
     SankofaReplayMode mode = SankofaReplayMode.wireframe,
     int fps = 1,
   }) {
@@ -58,6 +60,7 @@ class SankofaReplay {
     _apiKey = apiKey;
     _endpoint = endpoint;
     _sessionId = sessionId;
+    _distinctId = distinctId;
     _mode = mode;
     _fps = fps;
     _isInit = true;
@@ -72,6 +75,10 @@ class SankofaReplay {
       );
       _startRecording();
     });
+  }
+
+  void setDistinctId(String distinctId) {
+    _distinctId = distinctId;
   }
 
   void _startRecording() {
@@ -240,6 +247,7 @@ class SankofaReplay {
         ..headers['Content-Type'] = 'application/json'
         ..headers['Content-Encoding'] = 'gzip'
         ..headers['X-Session-Id'] = _sessionId
+        ..headers['X-Distinct-Id'] = _distinctId
         ..headers['X-Chunk-Index'] = _chunkIndex.toString()
         ..headers['X-Replay-Mode'] = _mode.name
         ..bodyBytes = compressedBody;

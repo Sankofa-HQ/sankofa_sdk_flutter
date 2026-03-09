@@ -99,6 +99,7 @@ class Sankofa with WidgetsBindingObserver {
         apiKey: _apiKey!,
         endpoint: baseUrl,
         sessionId: _sessionId!,
+        distinctId: _userId ?? _anonymousId ?? 'anonymous',
         mode: _replayMode,
         fps: _replayFps,
       );
@@ -224,6 +225,9 @@ class Sankofa with WidgetsBindingObserver {
     }
 
     _flush();
+    if (_enableSessionReplay) {
+      SankofaReplay.instance.setDistinctId(userId);
+    }
   }
 
   /// Reset identity (Logout)
@@ -234,6 +238,9 @@ class Sankofa with WidgetsBindingObserver {
     await prefs.remove('sankofa_user_id');
     await prefs.setString(_kAnonIdKey, _anonymousId!);
     appPrint('🔄 Reset Identity: New AnonID $_anonymousId');
+    if (_enableSessionReplay) {
+      SankofaReplay.instance.setDistinctId(_anonymousId!);
+    }
   }
 
   /// Set User Properties (People Profile)
