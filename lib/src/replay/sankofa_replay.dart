@@ -7,6 +7,9 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
+
+enum SankofaReplayMode { wireframe, screenshot }
 
 class SankofaReplay {
   static final SankofaReplay instance = SankofaReplay._internal();
@@ -19,8 +22,14 @@ class SankofaReplay {
   String _apiKey = '';
   String _endpoint = '';
   String _sessionId = '';
+  SankofaReplayMode _mode = SankofaReplayMode.wireframe;
   int _fps = 1;
   Timer? _captureTimer;
+
+  // Device dimensions for wireframe mode
+  double _screenWidth = 0;
+  double _screenHeight = 0;
+  double _pixelRatio = 1.0;
 
   final GlobalKey _repaintBoundaryKey = GlobalKey();
 
@@ -29,37 +38,95 @@ class SankofaReplay {
 
   // Expose this for the Mask render object
   bool get isCapturingFrame => _isCapturingFrame;
+  SankofaReplayMode get mode => _mode;
 
   final List<_ReplayFrame> _frameBuffer = [];
+  final List<Map<String, dynamic>> _eventBuffer = [];
+  DateTime? _chunkStartTime;
+
   int _chunkIndex = 0;
   bool _isFlushing = false;
 
-  /// Start recording the session. Call this after `Sankofa.instance.init()`
   void init({
     required String apiKey,
     required String endpoint,
     required String sessionId,
+    SankofaReplayMode mode = SankofaReplayMode.wireframe,
     int fps = 1,
   }) {
     if (_isInit) return;
     _apiKey = apiKey;
     _endpoint = endpoint;
     _sessionId = sessionId;
+    _mode = mode;
     _fps = fps;
     _isInit = true;
-    print(
-      '🎥 SankofaReplay: Initialized correctly with Session: $_sessionId and Endpoint: $_endpoint',
-    );
-    _startRecording();
+
+    // Load persisted chunk index to prevent Backblaze duplicates on hot restarts
+    SharedPreferences.getInstance().then((prefs) {
+      final key = 'sankofa_replay_chunk_$_sessionId';
+      _chunkIndex = prefs.getInt(key) ?? 0;
+
+      print(
+        '🎥 SankofaReplay: Initialized correctly with Session: $_sessionId and Endpoint: $_endpoint (Starting at Chunk $_chunkIndex)',
+      );
+      _startRecording();
+    });
   }
 
   void _startRecording() {
     if (_isRecording || !_isInit) return;
     _isRecording = true;
+    _chunkStartTime = DateTime.now();
 
-    final duration = Duration(milliseconds: 1000 ~/ _fps);
-    _captureTimer = Timer.periodic(duration, (_) => _captureFrame());
+    if (_mode == SankofaReplayMode.screenshot) {
+      final duration = Duration(milliseconds: (1000 / _fps).round());
+      _captureTimer = Timer.periodic(duration, (_) => _captureFrame());
+    } else {
+      // Wireframe Mode uses a 10s async flush loop instead of FPS capture
+      _captureTimer = Timer.periodic(
+        const Duration(seconds: 10),
+        (_) => _flush(),
+      );
+    }
   }
+
+  // --- Wireframe Engine Methods ---
+
+  void _updateDeviceContext(double width, double height, double pixelRatio) {
+    _screenWidth = width;
+    _screenHeight = height;
+    _pixelRatio = pixelRatio;
+  }
+
+  void _recordPointerEvent(String type, PointerEvent event) {
+    if (_mode != SankofaReplayMode.wireframe || !_isRecording) return;
+    _chunkStartTime ??= DateTime.now();
+
+    _eventBuffer.add({
+      'type': type,
+      'x': event.position.dx,
+      'y': event.position.dy,
+      'time_offset_ms': DateTime.now()
+          .difference(_chunkStartTime!)
+          .inMilliseconds,
+    });
+  }
+
+  void _recordRouteEvent(String routeName) {
+    if (_mode != SankofaReplayMode.wireframe || !_isRecording) return;
+    _chunkStartTime ??= DateTime.now();
+
+    _eventBuffer.add({
+      'type': 'route_change',
+      'route': routeName,
+      'time_offset_ms': DateTime.now()
+          .difference(_chunkStartTime!)
+          .inMilliseconds,
+    });
+  }
+
+  // --- Screenshot Engine Methods ---
 
   void stopRecording() {
     _captureTimer?.cancel();
@@ -120,29 +187,47 @@ class SankofaReplay {
   }
 
   Future<void> _flush({bool force = false}) async {
-    if (_isFlushing || _frameBuffer.isEmpty) return;
+    if (_isFlushing) return;
+
+    // Check if we have any data to send
+    if (_mode == SankofaReplayMode.screenshot && _frameBuffer.isEmpty) return;
+    if (_mode == SankofaReplayMode.wireframe && _eventBuffer.isEmpty) return;
+
     _isFlushing = true;
 
-    // 1. Snapshot the queue and clear it to accept new frames while uploading
+    // 1. Snapshot the queue and clear it to accept new data while uploading
     final framesToUpload = List.of(_frameBuffer);
+    final eventsToUpload = List.of(_eventBuffer);
+
     _frameBuffer.clear();
+    _eventBuffer.clear();
+
+    // Reset chunk timer for relative event tracking
+    _chunkStartTime = DateTime.now();
 
     try {
-      // 2. Build the JSON Batch Payload with precise timestamps
-      final List<Map<String, dynamic>> serializedFrames = framesToUpload.map((
-        f,
-      ) {
-        return {
-          'timestamp': f.timestamp.millisecondsSinceEpoch,
-          'image_base64': base64Encode(f.bytes),
-        };
-      }).toList();
-
+      // 2. Build the JSON Batch Payload
       final Map<String, dynamic> payload = {
         'session_id': _sessionId,
         'chunk_index': _chunkIndex,
-        'frames': serializedFrames,
+        'mode': _mode.name,
       };
+
+      if (_mode == SankofaReplayMode.screenshot) {
+        payload['frames'] = framesToUpload.map((f) {
+          return {
+            'timestamp': f.timestamp.millisecondsSinceEpoch,
+            'image_base64': base64Encode(f.bytes),
+          };
+        }).toList();
+      } else {
+        payload['device_context'] = {
+          'screen_width': _screenWidth,
+          'screen_height': _screenHeight,
+          'pixel_ratio': _pixelRatio,
+        };
+        payload['events'] = eventsToUpload;
+      }
 
       // 3. Gzip the JSON directly on the device (Massive bandwidth saver)
       final jsonString = jsonEncode(payload);
@@ -156,24 +241,39 @@ class SankofaReplay {
         ..headers['Content-Encoding'] = 'gzip'
         ..headers['X-Session-Id'] = _sessionId
         ..headers['X-Chunk-Index'] = _chunkIndex.toString()
+        ..headers['X-Replay-Mode'] = _mode.name
         ..bodyBytes = compressedBody;
 
       final resp = await req.send();
 
       if (resp.statusCode == 200) {
+        final itemCount = _mode == SankofaReplayMode.screenshot
+            ? framesToUpload.length
+            : eventsToUpload.length;
         print(
-          '🚀 SankofaReplay: Uploaded chunk $_chunkIndex (${framesToUpload.length} frames)',
+          '🚀 SankofaReplay: Uploaded ${_mode.name} chunk $_chunkIndex ($itemCount items)',
         );
         _chunkIndex++;
+        // Persist the incremented index in case the app is killed
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setInt('sankofa_replay_chunk_$_sessionId', _chunkIndex);
       } else {
         print('❌ SankofaReplay: Chunk upload failed: ${resp.statusCode}');
-        // 🛡️ CRITICAL: If upload fails (e.g., went into a tunnel), put frames back!
-        _frameBuffer.insertAll(0, framesToUpload);
+        // 🛡️ CRITICAL: If upload fails (e.g., went into a tunnel), put data back!
+        if (_mode == SankofaReplayMode.screenshot) {
+          _frameBuffer.insertAll(0, framesToUpload);
+        } else {
+          _eventBuffer.insertAll(0, eventsToUpload);
+        }
       }
     } catch (e) {
       print('❌ SankofaReplay: flush error: $e');
       // 🛡️ CRITICAL: Network crash fallback
-      _frameBuffer.insertAll(0, framesToUpload);
+      if (_mode == SankofaReplayMode.screenshot) {
+        _frameBuffer.insertAll(0, framesToUpload);
+      } else {
+        _eventBuffer.insertAll(0, eventsToUpload);
+      }
     } finally {
       _isFlushing = false;
     }
@@ -194,7 +294,6 @@ class _ReplayFrame {
   _ReplayFrame(this.timestamp, this.bytes);
 }
 
-/// Wrap your root MaterialApp with this widget to enable screenshot capture.
 class SankofaReplayBoundary extends StatelessWidget {
   final Widget child;
 
@@ -202,9 +301,34 @@ class SankofaReplayBoundary extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // Safely capture Device Dimensions once without relying on a MaterialApp ancestor
+    try {
+      final view = ui.PlatformDispatcher.instance.views.first;
+      SankofaReplay.instance._updateDeviceContext(
+        view.physicalSize.width,
+        view.physicalSize.height,
+        view.devicePixelRatio,
+      );
+    } catch (e) {
+      if (kDebugMode)
+        print('⚠️ SankofaReplay: Could not load screen dimensions');
+    }
+
+    // Always include BOTH the RepaintBoundary (for Screenshot Mode)
+    // AND the Listener (for Wireframe Mode).
+    // The active `_mode` property will determine which engine actually collects data.
     return RepaintBoundary(
       key: SankofaReplay.instance.rootBoundaryKey,
-      child: child,
+      child: Listener(
+        behavior: HitTestBehavior.translucent,
+        onPointerDown: (e) =>
+            SankofaReplay.instance._recordPointerEvent('pointer_down', e),
+        onPointerMove: (e) =>
+            SankofaReplay.instance._recordPointerEvent('pointer_move', e),
+        onPointerUp: (e) =>
+            SankofaReplay.instance._recordPointerEvent('pointer_up', e),
+        child: child,
+      ),
     );
   }
 }
@@ -235,7 +359,9 @@ class _RenderSankofaMask extends RenderProxyBox {
       context.canvas.drawRect(offset & size, paint);
     } else {
       // Paint the child normally
-      super.paint(context, offset);
+      if (child != null) {
+        context.paintChild(child!, offset);
+      }
     }
   }
 }
@@ -244,6 +370,24 @@ class SankofaNavigatorObserver extends RouteObserver<PageRoute<dynamic>> {
   @override
   void didPush(Route<dynamic> route, Route<dynamic>? previousRoute) {
     super.didPush(route, previousRoute);
-    // Could send a route change event to Sankofa core here natively
+    if (route.settings.name != null) {
+      SankofaReplay.instance._recordRouteEvent(route.settings.name!);
+    }
+  }
+
+  @override
+  void didReplace({Route<dynamic>? newRoute, Route<dynamic>? oldRoute}) {
+    super.didReplace(newRoute: newRoute, oldRoute: oldRoute);
+    if (newRoute?.settings.name != null) {
+      SankofaReplay.instance._recordRouteEvent(newRoute!.settings.name!);
+    }
+  }
+
+  @override
+  void didPop(Route<dynamic> route, Route<dynamic>? previousRoute) {
+    super.didPop(route, previousRoute);
+    if (previousRoute?.settings.name != null) {
+      SankofaReplay.instance._recordRouteEvent(previousRoute!.settings.name!);
+    }
   }
 }

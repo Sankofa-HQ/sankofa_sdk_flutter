@@ -45,6 +45,10 @@ class Sankofa with WidgetsBindingObserver {
   Timer? _flushTimer;
   bool _isFlushing = false;
 
+  SankofaReplayMode _replayMode = SankofaReplayMode.wireframe;
+  int _replayFps = 1;
+  bool _enableSessionReplay = true;
+
   Sankofa._internal();
 
   /// Initialize the SDK
@@ -53,11 +57,17 @@ class Sankofa with WidgetsBindingObserver {
     String endpoint = 'http://localhost:8080',
     bool debug = false,
     bool trackLifecycleEvents = true,
+    bool enableSessionReplay = true,
+    SankofaReplayMode replayMode = SankofaReplayMode.wireframe,
+    int replayFps = 1,
   }) async {
     _apiKey = apiKey;
     _endpoint = "$endpoint/api/v1/track";
     _debug = debug;
     _trackLifecycleEvents = trackLifecycleEvents;
+    _enableSessionReplay = enableSessionReplay;
+    _replayMode = replayMode;
+    _replayFps = replayFps;
 
     await _loadAnonymousId();
     await _loadQueue();
@@ -81,6 +91,7 @@ class Sankofa with WidgetsBindingObserver {
   }
 
   void _initReplay() {
+    if (!_enableSessionReplay) return;
     if (_apiKey != null && _endpoint != null && _sessionId != null) {
       // The _endpoint is <baseUrl>/api/v1/track, we need just the base.
       final baseUrl = _endpoint!.replaceAll('/api/v1/track', '');
@@ -88,6 +99,8 @@ class Sankofa with WidgetsBindingObserver {
         apiKey: _apiKey!,
         endpoint: baseUrl,
         sessionId: _sessionId!,
+        mode: _replayMode,
+        fps: _replayFps,
       );
     }
   }
