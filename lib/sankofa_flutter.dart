@@ -49,6 +49,14 @@ class Sankofa with WidgetsBindingObserver {
   int _replayFps = 1;
   bool _enableSessionReplay = true;
 
+  // High-fidelity dynamic triggers
+  List<String> _highFidelityTriggers = [
+    'purchase_error',
+    'checkout_started',
+    'app_crash',
+  ];
+  Duration _highFidelityDuration = const Duration(seconds: 30);
+
   Sankofa._internal();
 
   /// Initialize the SDK
@@ -102,6 +110,36 @@ class Sankofa with WidgetsBindingObserver {
         distinctId: _userId ?? _anonymousId ?? 'anonymous',
         mode: _replayMode,
         fps: _replayFps,
+      );
+
+      // Fetch dynamic configuration overrides from the Go backend natively
+      _fetchReplayConfig(baseUrl);
+    }
+  }
+
+  Future<void> _fetchReplayConfig(String baseUrl) async {
+    try {
+      final uri = Uri.parse('$baseUrl/api/ee/replay/config');
+      final resp = await http.get(uri, headers: {'x-api-key': _apiKey!});
+      if (resp.statusCode == 200) {
+        final data = jsonDecode(resp.body);
+        if (data['high_fidelity_triggers'] != null) {
+          _highFidelityTriggers = List<String>.from(
+            data['high_fidelity_triggers'],
+          );
+        }
+        if (data['high_fidelity_duration_seconds'] != null) {
+          _highFidelityDuration = Duration(
+            seconds: data['high_fidelity_duration_seconds'],
+          );
+        }
+        appPrint(
+          '⚙️ Sankofa: Loaded remote Replay Config: $_highFidelityTriggers',
+        );
+      }
+    } catch (e) {
+      appPrint(
+        '⚠️ Sankofa: Failed to load remote Replay Config, using local defaults.',
       );
     }
   }
@@ -322,6 +360,12 @@ class Sankofa with WidgetsBindingObserver {
     appPrint(
       '📝 Tracked: $eventName (Session: ${_sessionId?.substring(0, 8)}...)',
     );
+
+    // 🌟 SHAPESHIFTER TIER: Dynamite Video Triggers!
+    // Intercept Analytics events and turn on video recording automatically
+    if (_enableSessionReplay && _highFidelityTriggers.contains(eventName)) {
+      SankofaReplay.instance.triggerHighFidelityMode(_highFidelityDuration);
+    }
 
     if (_queue.length >= 10) _flush();
   }

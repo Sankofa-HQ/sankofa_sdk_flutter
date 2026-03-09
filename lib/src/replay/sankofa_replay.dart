@@ -26,6 +26,7 @@ class SankofaReplay {
   SankofaReplayMode _mode = SankofaReplayMode.wireframe;
   int _fps = 1;
   Timer? _captureTimer;
+  Timer? _highFidelityTimer;
 
   // Device dimensions for wireframe mode
   double _screenWidth = 0;
@@ -98,6 +99,60 @@ class SankofaReplay {
     }
   }
 
+  // --- Dynamic Mode Switching ---
+
+  /// Temporarily switches the recording engine to high-fidelity (screenshot mode)
+  /// for a set duration to capture critical visual states.
+  void triggerHighFidelityMode(Duration duration) {
+    if (!_isInit || !_isRecording) return;
+
+    // If already in screenshot mode, just extend the timer if applicable
+    if (_mode == SankofaReplayMode.screenshot) {
+      _highFidelityTimer?.cancel();
+      _highFidelityTimer = Timer(duration, _revertToWireframe);
+      return;
+    }
+
+    print(
+      '🔥 SankofaReplay: High-Fidelity Trigger activated for ${duration.inSeconds} seconds!',
+    );
+
+    // 1. Flush any pending wireframes immediately
+    _flush(force: true).then((_) {
+      // 2. Switch mode
+      _mode = SankofaReplayMode.screenshot;
+      _chunkStartTime = DateTime.now();
+
+      // 3. Restart timers for screenshot capture
+      _captureTimer?.cancel();
+      final fpsDuration = Duration(milliseconds: (1000 / _fps).round());
+      _captureTimer = Timer.periodic(fpsDuration, (_) => _captureFrame());
+
+      // 4. Set the timer to revert back to wireframe
+      _highFidelityTimer?.cancel();
+      _highFidelityTimer = Timer(duration, _revertToWireframe);
+    });
+  }
+
+  void _revertToWireframe() {
+    if (_mode != SankofaReplayMode.screenshot || !_isRecording) return;
+
+    print(
+      '🧊 SankofaReplay: High-Fidelity duration ended. Reverting to wireframe.',
+    );
+
+    _flush(force: true).then((_) {
+      _mode = SankofaReplayMode.wireframe;
+      _chunkStartTime = DateTime.now();
+
+      _captureTimer?.cancel();
+      _captureTimer = Timer.periodic(
+        const Duration(seconds: 10),
+        (_) => _flush(),
+      );
+    });
+  }
+
   // --- Wireframe Engine Methods ---
 
   void _updateDeviceContext(double width, double height, double pixelRatio) {
@@ -137,6 +192,7 @@ class SankofaReplay {
 
   void stopRecording() {
     _captureTimer?.cancel();
+    _highFidelityTimer?.cancel();
     _isRecording = false;
     _flush(force: true);
   }
@@ -205,6 +261,7 @@ class SankofaReplay {
     // 1. Snapshot the queue and clear it to accept new data while uploading
     final framesToUpload = List.of(_frameBuffer);
     final eventsToUpload = List.of(_eventBuffer);
+    final oldChunkStartTime = _chunkStartTime;
 
     _frameBuffer.clear();
     _eventBuffer.clear();
@@ -228,6 +285,9 @@ class SankofaReplay {
           };
         }).toList();
       } else {
+        payload['chunk_start_timestamp'] =
+            oldChunkStartTime?.millisecondsSinceEpoch ??
+            DateTime.now().millisecondsSinceEpoch;
         payload['device_context'] = {
           'screen_width': _screenWidth,
           'screen_height': _screenHeight,
