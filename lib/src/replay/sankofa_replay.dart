@@ -186,6 +186,99 @@ class SankofaReplay {
           .difference(_chunkStartTime!)
           .inMilliseconds,
     });
+
+    // 🌟 NEW: Take a snapshot of the UI 500ms after a route change (allowing animations to finish)
+    Future.delayed(const Duration(milliseconds: 500), () {
+      _captureUIBlueprint();
+    });
+  }
+
+  /// Walks the Flutter Element tree to map the UI layout
+  void _captureUIBlueprint() {
+    if (_mode != SankofaReplayMode.wireframe || !_isRecording) return;
+    if (_repaintBoundaryKey.currentContext == null) return;
+
+    try {
+      final rootRenderObject = _repaintBoundaryKey.currentContext!
+          .findRenderObject();
+      if (rootRenderObject == null) return;
+
+      final List<Map<String, dynamic>> nodes = [];
+
+      // Recursive function to walk the tree
+      void walkTree(Element element) {
+        final widget = element.widget;
+        final renderObject = element.renderObject;
+
+        // We only care about specific visual widgets to save bandwidth
+        final isMeaningful =
+            widget is Text ||
+            widget is Image ||
+            widget is Icon ||
+            widget is ElevatedButton ||
+            widget is Container ||
+            widget is Card;
+
+        if (isMeaningful && renderObject is RenderBox && renderObject.hasSize) {
+          try {
+            // Get exact coordinates relative to our root boundary
+            final offset = renderObject.localToGlobal(
+              Offset.zero,
+              ancestor: rootRenderObject,
+            );
+            final size = renderObject.size;
+
+            // Ignore invisible or full-screen wrappers to keep JSON tiny
+            if (size.width > 0 &&
+                size.height > 0 &&
+                size.width < _screenWidth &&
+                size.height < _screenHeight) {
+              // Determine a simple type for the Next.js dashboard to color-code
+              String nodeType = 'box';
+              if (widget is Text) nodeType = 'text';
+              if (widget is Image || widget is Icon) nodeType = 'media';
+              if (widget is ElevatedButton) nodeType = 'button';
+
+              nodes.add({
+                't': nodeType,
+                'x': offset.dx.round(),
+                'y': offset.dy.round(),
+                'w': size.width.round(),
+                'h': size.height.round(),
+              });
+            }
+          } catch (e) {
+            // Ignore geometry errors for unmounted widgets
+          }
+        }
+
+        // Recursively visit children
+        element.visitChildren(walkTree);
+      }
+
+      // Start the walk from the root boundary
+      _repaintBoundaryKey.currentContext!.visitChildElements(walkTree);
+
+      // Save the snapshot to the event buffer
+      _chunkStartTime ??= DateTime.now();
+      _eventBuffer.add({
+        'type': 'ui_snapshot',
+        'time_offset_ms': DateTime.now()
+            .difference(_chunkStartTime!)
+            .inMilliseconds,
+        'nodes': nodes,
+      });
+
+      if (kDebugMode) {
+        print(
+          '📐 SankofaReplay: Captured UI Blueprint with ${nodes.length} nodes',
+        );
+      }
+    } catch (e) {
+      if (kDebugMode) {
+        print('❌ SankofaReplay Blueprint Error: $e');
+      }
+    }
   }
 
   // --- Screenshot Engine Methods ---
