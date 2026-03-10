@@ -96,6 +96,11 @@ class SankofaReplay {
         const Duration(seconds: 10),
         (_) => _flush(),
       );
+
+      // Capture the initial UI blueprint for the first screen
+      Future.delayed(const Duration(milliseconds: 1000), () {
+        _captureUIBlueprint();
+      });
     }
   }
 
@@ -193,6 +198,32 @@ class SankofaReplay {
     });
   }
 
+  double _lastScrollY = 0;
+  Timer? _scrollDebounceTimer;
+
+  void _recordScrollEvent(double scrollY) {
+    if (_mode != SankofaReplayMode.wireframe || !_isRecording) return;
+    _chunkStartTime ??= DateTime.now();
+
+    // Debounce noise for tiny rapid scroll ticks
+    if ((scrollY - _lastScrollY).abs() < 5) return;
+    _lastScrollY = scrollY;
+
+    _eventBuffer.add({
+      'type': 'scroll',
+      'y': scrollY,
+      'time_offset_ms': DateTime.now()
+          .difference(_chunkStartTime!)
+          .inMilliseconds,
+    });
+
+    // Capture the UI blueprint 500ms after the user *stops* scrolling
+    _scrollDebounceTimer?.cancel();
+    _scrollDebounceTimer = Timer(const Duration(milliseconds: 500), () {
+      _captureUIBlueprint();
+    });
+  }
+
   /// Walks the Flutter Element tree to map the UI layout
   void _captureUIBlueprint() {
     if (_mode != SankofaReplayMode.wireframe || !_isRecording) return;
@@ -210,14 +241,16 @@ class SankofaReplay {
         final widget = element.widget;
         final renderObject = element.renderObject;
 
-        // We only care about specific visual widgets to save bandwidth
+        // We only care about leaf-node widgets to keep the UI clean
         final isMeaningful =
             widget is Text ||
             widget is Image ||
             widget is Icon ||
             widget is ElevatedButton ||
-            widget is Container ||
-            widget is Card;
+            widget is TextButton ||
+            widget is OutlinedButton ||
+            widget is FilledButton ||
+            widget is IconButton;
 
         if (isMeaningful && renderObject is RenderBox && renderObject.hasSize) {
           try {
@@ -233,14 +266,22 @@ class SankofaReplay {
                 size.height > 0 &&
                 size.width < _screenWidth &&
                 size.height < _screenHeight) {
-              // Determine a simple type for the Next.js dashboard to color-code
+              
               String nodeType = 'box';
-              if (widget is Text) nodeType = 'text';
-              if (widget is Image || widget is Icon) nodeType = 'media';
-              if (widget is ElevatedButton) nodeType = 'button';
+              String? nodeValue;
+
+              if (widget is Text) {
+                nodeType = 'text';
+                nodeValue = widget.data ?? widget.textSpan?.toPlainText();
+              } else if (widget is Image || widget is Icon) {
+                nodeType = 'media';
+              } else if (widget is ElevatedButton || widget is TextButton || widget is OutlinedButton || widget is FilledButton || widget is IconButton) {
+                nodeType = 'button';
+              }
 
               nodes.add({
                 't': nodeType,
+                if (nodeValue != null) 'v': nodeValue,
                 'x': offset.dx.round(),
                 'y': offset.dy.round(),
                 'w': size.width.round(),
@@ -466,8 +507,8 @@ class SankofaReplayBoundary extends StatelessWidget {
     try {
       final view = ui.PlatformDispatcher.instance.views.first;
       SankofaReplay.instance._updateDeviceContext(
-        view.physicalSize.width,
-        view.physicalSize.height,
+        view.physicalSize.width / view.devicePixelRatio,
+        view.physicalSize.height / view.devicePixelRatio,
         view.devicePixelRatio,
       );
     } catch (e) {
@@ -480,15 +521,23 @@ class SankofaReplayBoundary extends StatelessWidget {
     // The active `_mode` property will determine which engine actually collects data.
     return RepaintBoundary(
       key: SankofaReplay.instance.rootBoundaryKey,
-      child: Listener(
-        behavior: HitTestBehavior.translucent,
-        onPointerDown: (e) =>
-            SankofaReplay.instance._recordPointerEvent('pointer_down', e),
-        onPointerMove: (e) =>
-            SankofaReplay.instance._recordPointerEvent('pointer_move', e),
-        onPointerUp: (e) =>
-            SankofaReplay.instance._recordPointerEvent('pointer_up', e),
-        child: child,
+      child: NotificationListener<ScrollNotification>(
+        onNotification: (ScrollNotification scrollInfo) {
+          if (scrollInfo.depth == 0) {
+            SankofaReplay.instance._recordScrollEvent(scrollInfo.metrics.pixels);
+          }
+          return false;
+        },
+        child: Listener(
+          behavior: HitTestBehavior.translucent,
+          onPointerDown: (e) =>
+              SankofaReplay.instance._recordPointerEvent('pointer_down', e),
+          onPointerMove: (e) =>
+              SankofaReplay.instance._recordPointerEvent('pointer_move', e),
+          onPointerUp: (e) =>
+              SankofaReplay.instance._recordPointerEvent('pointer_up', e),
+          child: child,
+        ),
       ),
     );
   }
