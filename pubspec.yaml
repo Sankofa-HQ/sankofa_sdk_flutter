@@ -1,11 +1,11 @@
 name: sankofa_flutter
-description: "A new Flutter package project."
+description: "Flutter client SDK for Sankofa Analytics with offline queueing and session replay."
 version: 0.0.1
-homepage:
+homepage: https://sankofa.dev
 
 environment:
   sdk: ^3.10.1
-  flutter: ">=1.17.0"
+  flutter: ">=3.38.0"
 
 dependencies:
   device_info_plus: ^12.3.0

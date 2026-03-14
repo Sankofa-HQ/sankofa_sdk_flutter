@@ -1,5 +1,3 @@
-library sankofa_flutter;
-
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -29,11 +27,14 @@ class Sankofa with WidgetsBindingObserver {
   static Sankofa get instance => _instance;
 
   String? _apiKey;
-  String? _endpoint;
+  Uri? _serverBaseUri;
+  Uri? _v1BaseUri;
+  Uri? _trackUri;
   String? _userId;
   String? _anonymousId;
   String? _sessionId;
 
+  bool _isInitialized = false;
   bool _debug = false;
   bool _trackLifecycleEvents = true;
   final Map<String, String> _defaultProperties = {};
@@ -69,8 +70,12 @@ class Sankofa with WidgetsBindingObserver {
     SankofaReplayMode replayMode = SankofaReplayMode.wireframe,
     int replayFps = 1,
   }) async {
+    _resetRuntimeStateForInit();
+
     _apiKey = apiKey;
-    _endpoint = "$endpoint/api/v1/track";
+    _serverBaseUri = resolveServerBaseUri(endpoint);
+    _v1BaseUri = resolveV1BaseUri(endpoint);
+    _trackUri = resolveTrackUri(endpoint);
     _debug = debug;
     _trackLifecycleEvents = trackLifecycleEvents;
     _enableSessionReplay = enableSessionReplay;
@@ -81,7 +86,9 @@ class Sankofa with WidgetsBindingObserver {
     await _loadQueue();
     await _loadDefaultProperties();
     await _updateNetworkProperties(); // Initial network check
+    await _refreshSession();
     _initDeepLinkListener(); // Start listening for UTMs
+    await _configureReplay();
 
     // Start auto-flush timer
     _flushTimer = Timer.periodic(const Duration(seconds: 30), (_) => _flush());
@@ -94,32 +101,51 @@ class Sankofa with WidgetsBindingObserver {
       await track('\$app_opened');
     }
 
-    _initReplay();
-    appPrint('⚡ Sankofa initialized');
+    _isInitialized = true;
+    _log('⚡ Sankofa initialized');
   }
 
-  void _initReplay() {
+  void _resetRuntimeStateForInit() {
+    if (_isInitialized) {
+      WidgetsBinding.instance.removeObserver(this);
+    }
+
+    SankofaReplay.instance.stopRecording();
+    _flushTimer?.cancel();
+    _flushTimer = null;
+    _linkSubscription?.cancel();
+    _linkSubscription = null;
+
+    _queue.clear();
+    _defaultProperties.clear();
+  }
+
+  Future<void> _configureReplay() async {
     if (!_enableSessionReplay) return;
-    if (_apiKey != null && _endpoint != null && _sessionId != null) {
-      // The _endpoint is <baseUrl>/api/v1/track, we need just the base.
-      final baseUrl = _endpoint!.replaceAll('/api/v1/track', '');
-      SankofaReplay.instance.init(
+    if (_apiKey != null && _serverBaseUri != null && _sessionId != null) {
+      await SankofaReplay.instance.configure(
         apiKey: _apiKey!,
-        endpoint: baseUrl,
+        endpoint: _serverBaseUri!.toString(),
         sessionId: _sessionId!,
         distinctId: _userId ?? _anonymousId ?? 'anonymous',
         mode: _replayMode,
         fps: _replayFps,
+        debug: _debug,
       );
 
       // Fetch dynamic configuration overrides from the Go backend natively
-      _fetchReplayConfig(baseUrl);
+      await _fetchReplayConfig(_serverBaseUri!);
     }
   }
 
-  Future<void> _fetchReplayConfig(String baseUrl) async {
+  Future<void> _fetchReplayConfig(Uri serverBaseUri) async {
     try {
-      final uri = Uri.parse('$baseUrl/api/ee/replay/config');
+      final uri = _appendPath(serverBaseUri, const [
+        'api',
+        'ee',
+        'replay',
+        'config',
+      ]);
       final resp = await http.get(uri, headers: {'x-api-key': _apiKey!});
       if (resp.statusCode == 200) {
         final data = jsonDecode(resp.body);
@@ -133,12 +159,10 @@ class Sankofa with WidgetsBindingObserver {
             seconds: data['high_fidelity_duration_seconds'],
           );
         }
-        appPrint(
-          '⚙️ Sankofa: Loaded remote Replay Config: $_highFidelityTriggers',
-        );
+        _log('⚙️ Sankofa: Loaded remote Replay Config: $_highFidelityTriggers');
       }
     } catch (e) {
-      appPrint(
+      _log(
         '⚠️ Sankofa: Failed to load remote Replay Config, using local defaults.',
       );
     }
@@ -148,20 +172,26 @@ class Sankofa with WidgetsBindingObserver {
   void didChangeAppLifecycleState(AppLifecycleState state) {
     super.didChangeAppLifecycleState(state);
 
+    if (_enableSessionReplay) {
+      SankofaReplay.instance.onAppLifecycleStateChanged(state);
+    }
+
     if (state == AppLifecycleState.resumed) {
-      appPrint('🟢 App in Foreground');
+      _log('🟢 App in Foreground');
       if (_trackLifecycleEvents) {
-        track('\$app_foregrounded');
+        unawaited(track('\$app_foregrounded'));
       }
     } else if (state == AppLifecycleState.paused) {
-      appPrint('🔴 App in Background - Forcing Emergency Flush');
+      _log('🔴 App in Background - Forcing Emergency Flush');
       if (_trackLifecycleEvents) {
-        track('\$app_backgrounded').then((_) {
-          _flush();
-        });
+        unawaited(
+          track('\$app_backgrounded').then((_) {
+            _flush();
+          }),
+        );
       } else {
         // Still force flush even if we aren't tracking the lifecycle event!
-        _flush();
+        unawaited(_flush());
       }
     }
   }
@@ -170,40 +200,48 @@ class Sankofa with WidgetsBindingObserver {
     WidgetsBinding.instance.removeObserver(this);
     _flushTimer?.cancel();
     _linkSubscription?.cancel();
+    if (_enableSessionReplay) {
+      SankofaReplay.instance.stopRecording();
+    }
+    _isInitialized = false;
   }
 
   /// 🌐 Listen for Deep Links to capture UTM Marketing data
   void _initDeepLinkListener() {
-    _appLinks = AppLinks();
+    try {
+      _appLinks = AppLinks();
 
-    _linkSubscription = _appLinks.uriLinkStream.listen((uri) {
-      appPrint('🔗 Deep Link Caught: $uri');
+      _linkSubscription = _appLinks.uriLinkStream.listen((uri) {
+        _log('🔗 Deep Link Caught: $uri');
 
-      final queryParams = uri.queryParameters;
-      bool hasUtms = false;
+        final queryParams = uri.queryParameters;
+        bool hasUtms = false;
 
-      // Extract standard marketing UTMs and attach them to the session
-      final utmKeys = [
-        'utm_source',
-        'utm_medium',
-        'utm_campaign',
-        'utm_term',
-        'utm_content',
-      ];
+        // Extract standard marketing UTMs and attach them to the session
+        final utmKeys = [
+          'utm_source',
+          'utm_medium',
+          'utm_campaign',
+          'utm_term',
+          'utm_content',
+        ];
 
-      for (final key in utmKeys) {
-        if (queryParams.containsKey(key)) {
-          // Note: Mixpanel doesn't use the '\$' prefix for UTMs
-          _defaultProperties[key] = queryParams[key]!;
-          hasUtms = true;
+        for (final key in utmKeys) {
+          if (queryParams.containsKey(key)) {
+            // Note: Mixpanel doesn't use the '\$' prefix for UTMs
+            _defaultProperties[key] = queryParams[key]!;
+            hasUtms = true;
+          }
         }
-      }
 
-      // If we caught UTMs, immediately track a marketing event
-      if (hasUtms) {
-        track('\$campaign_details', queryParams);
-      }
-    });
+        // If we caught UTMs, immediately track a marketing event
+        if (hasUtms) {
+          unawaited(track('\$campaign_details', queryParams));
+        }
+      });
+    } catch (e) {
+      _log('⚠️ Sankofa: Deep links are unavailable on this platform.');
+    }
   }
 
   /// 📡 Dynamic Network & Carrier Info
@@ -229,7 +267,7 @@ class Sankofa with WidgetsBindingObserver {
         }
       }
     } catch (e) {
-      appPrint('⚠️ Could not load network info (Simulators often fail this)');
+      _log('⚠️ Could not load network info (Simulators often fail this)');
     }
   }
 
@@ -259,10 +297,10 @@ class Sankofa with WidgetsBindingObserver {
       };
       _queue.add(aliasEvent);
       await _persistQueue();
-      appPrint('🔗 Identify: Aliasing $previousId -> $userId');
+      _log('🔗 Identify: Aliasing $previousId -> $userId');
     }
 
-    _flush();
+    await _flush();
     if (_enableSessionReplay) {
       SankofaReplay.instance.setDistinctId(userId);
     }
@@ -270,14 +308,22 @@ class Sankofa with WidgetsBindingObserver {
 
   /// Reset identity (Logout)
   Future<void> reset() async {
+    await _flush();
+
     _userId = null;
     _anonymousId = const Uuid().v4(); // Generate new Anon ID
+    _sessionId = const Uuid().v4();
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove('sankofa_user_id');
     await prefs.setString(_kAnonIdKey, _anonymousId!);
-    appPrint('🔄 Reset Identity: New AnonID $_anonymousId');
+    await prefs.setString(_kSessionIdKey, _sessionId!);
+    await prefs.setInt(
+      _kLastEventTimeKey,
+      DateTime.now().millisecondsSinceEpoch,
+    );
+    _log('🔄 Reset Identity: New AnonID $_anonymousId');
     if (_enableSessionReplay) {
-      SankofaReplay.instance.setDistinctId(_anonymousId!);
+      await _configureReplay();
     }
   }
 
@@ -286,16 +332,14 @@ class Sankofa with WidgetsBindingObserver {
     final profileEvent = {
       'type': 'people',
       'distinct_id': _userId ?? _anonymousId,
-      'properties': properties.map(
-        (key, value) => MapEntry(key, value.toString()),
-      ),
+      'properties': serializeTransportProperties(properties),
       'timestamp': DateTime.now().toIso8601String(),
       'message_id': const Uuid().v4(),
     };
     _queue.add(profileEvent);
     await _persistQueue();
-    appPrint('👤 People Set: $properties');
-    _flush();
+    _log('👤 People Set: $properties');
+    await _flush();
   }
 
   /// 🧠 Core Session Management Logic
@@ -311,8 +355,8 @@ class Sankofa with WidgetsBindingObserver {
         (now - lastEventTime) > (_kSessionTimeoutMinutes * 60 * 1000)) {
       _sessionId = const Uuid().v4();
       await prefs.setString(_kSessionIdKey, _sessionId!);
-      appPrint('🆕 New Session Started: $_sessionId');
-      _initReplay(); // Restart replay with new session ID
+      _log('🆕 New Session Started: $_sessionId');
+      await _configureReplay();
 
       // Optional: Auto-fire a Session Start event
       // _queue.add({... 'event_name': '\$session_started' ...});
@@ -328,7 +372,7 @@ class Sankofa with WidgetsBindingObserver {
     Map<String, dynamic>? properties,
   ]) async {
     if (_apiKey == null) {
-      appPrint('❌ Sankofa not initialized');
+      _log('❌ Sankofa not initialized');
       return;
     }
 
@@ -338,6 +382,10 @@ class Sankofa with WidgetsBindingObserver {
     // Refresh network state right before tracking (users turn wifi on/off)
     await _updateNetworkProperties();
 
+    final serializedProperties = properties == null
+        ? const <String, String>{}
+        : serializeTransportProperties(properties);
+
     final event = {
       'type': 'track',
       'event_name': eventName,
@@ -345,21 +393,18 @@ class Sankofa with WidgetsBindingObserver {
       'properties': {
         // Inject Session ID into the root properties of every event
         '\$session_id': _sessionId,
-        ...(properties?.map((key, value) => MapEntry(key, value.toString())) ??
-            {}),
+        ...serializedProperties,
       },
-      'default_properties': _defaultProperties,
+      'default_properties': Map<String, String>.from(_defaultProperties),
       'timestamp': DateTime.now().toIso8601String(),
-      'lib_version': 'flutter-0.1.1', // Bumped version
+      'lib_version': 'flutter-0.0.1',
       'message_id': const Uuid().v4(), // Perfect for ClickHouse deduplication
     };
 
     _queue.add(event);
     await _persistQueue();
 
-    appPrint(
-      '📝 Tracked: $eventName (Session: ${_sessionId?.substring(0, 8)}...)',
-    );
+    _log('📝 Tracked: $eventName (Session: ${_sessionId?.substring(0, 8)}...)');
 
     // 🌟 SHAPESHIFTER TIER: Dynamite Video Triggers!
     // Intercept Analytics events and turn on video recording automatically
@@ -367,7 +412,9 @@ class Sankofa with WidgetsBindingObserver {
       SankofaReplay.instance.triggerHighFidelityMode(_highFidelityDuration);
     }
 
-    if (_queue.length >= 10) _flush();
+    if (_queue.length >= 10) {
+      await _flush();
+    }
   }
 
   /// Load or generate anonymous ID
@@ -383,6 +430,7 @@ class Sankofa with WidgetsBindingObserver {
 
   /// Load pending events from disk
   Future<void> _loadQueue() async {
+    _queue.clear();
     final prefs = await SharedPreferences.getInstance();
     final jsonString = prefs.getString(_kQueueKey);
     if (jsonString != null) {
@@ -390,7 +438,7 @@ class Sankofa with WidgetsBindingObserver {
         final List<dynamic> list = jsonDecode(jsonString);
         _queue.addAll(list.cast<Map<String, dynamic>>());
       } catch (e) {
-        appPrint('❌ Failed to load queue: $e');
+        _log('❌ Failed to load queue: $e');
       }
     }
   }
@@ -403,6 +451,7 @@ class Sankofa with WidgetsBindingObserver {
 
   /// 🌐 Gather rich tier-1 device info
   Future<void> _loadDefaultProperties() async {
+    _defaultProperties.clear();
     final plugin = DeviceInfoPlugin();
     final packageInfo = await PackageInfo.fromPlatform();
 
@@ -435,17 +484,16 @@ class Sankofa with WidgetsBindingObserver {
       _defaultProperties['\$screen_height'] = view.physicalSize.height
           .toString();
     } catch (e) {
-      if (_debug) print('⚠️ Could not load screen dimensions');
+      _log('⚠️ Could not load screen dimensions');
     }
 
     // 5. Locale & Timezone Info
     _defaultProperties['\$timezone'] = DateTime.now().timeZoneName;
     try {
       final locale = ui.PlatformDispatcher.instance.locale;
-      _defaultProperties['\$locale'] =
-          '${locale.languageCode}_${locale.countryCode}';
+      _defaultProperties['\$locale'] = locale.toLanguageTag();
     } catch (e) {
-      appPrint('⚠️ Could not load locale');
+      _log('⚠️ Could not load locale');
     }
   }
 
@@ -457,33 +505,31 @@ class Sankofa with WidgetsBindingObserver {
     final batch = List<Map<String, dynamic>>.from(_queue);
     final failedEvents = <Map<String, dynamic>>[];
 
-    // Define base URL logic (remove /v1/track if present to get base)
-    // Actually simplicity: we assume _endpoint is the base API URL e.g. http://host:8080/v1
-    // But init() defaults to /v1/track. Let's fix that dynamically or just string replace.
-
-    final baseUrl = _endpoint!.replaceAll('/track', '');
-
     for (final event in batch) {
       try {
-        String url = _endpoint!;
-        if (event['type'] == 'alias') url = '$baseUrl/alias';
-        if (event['type'] == 'people') url = '$baseUrl/people';
+        Uri url = _trackUri!;
+        if (event['type'] == 'alias') {
+          url = _appendPath(_v1BaseUri!, const ['alias']);
+        }
+        if (event['type'] == 'people') {
+          url = _appendPath(_v1BaseUri!, const ['people']);
+        }
         // 'track' uses default _endpoint
 
         final res = await http.post(
-          Uri.parse(url),
+          url,
           headers: {'Content-Type': 'application/json', 'x-api-key': _apiKey!},
           body: jsonEncode(event),
         );
 
         if (res.statusCode != 200) {
-          appPrint('❌ Failed to send ${event['type']}: ${res.statusCode}');
+          _log('❌ Failed to send ${event['type']}: ${res.statusCode}');
           failedEvents.add(event); // Retry later
         } else {
-          appPrint('✅ Sent ${event['type']}');
+          _log('✅ Sent ${event['type']}');
         }
       } catch (e) {
-        appPrint('❌ Network error: $e');
+        _log('❌ Network error: $e');
         failedEvents.add(event);
       }
     }
@@ -494,7 +540,125 @@ class Sankofa with WidgetsBindingObserver {
     _isFlushing = false;
   }
 
-  void appPrint(String value) {
+  void _log(String value) {
     if (_debug) debugPrint(value);
+  }
+
+  @visibleForTesting
+  static Uri resolveServerBaseUri(String endpoint) {
+    final v1BaseUri = resolveV1BaseUri(endpoint);
+    final trimmedSegments = v1BaseUri.pathSegments
+        .where((segment) => segment.isNotEmpty)
+        .toList();
+
+    if (_endsWithSegments(trimmedSegments, const ['api', 'v1'])) {
+      return _replacePathSegments(
+        v1BaseUri,
+        trimmedSegments.sublist(0, trimmedSegments.length - 2),
+      );
+    }
+
+    return v1BaseUri;
+  }
+
+  @visibleForTesting
+  static Uri resolveV1BaseUri(String endpoint) {
+    final uri = Uri.parse(endpoint.trim());
+    final segments = uri.pathSegments
+        .where((segment) => segment.isNotEmpty)
+        .toList();
+
+    if (_endsWithSegments(segments, const ['api', 'v1', 'track'])) {
+      return _replacePathSegments(
+        uri,
+        segments.sublist(0, segments.length - 1),
+      );
+    }
+
+    if (_endsWithSegments(segments, const ['api', 'v1'])) {
+      return _replacePathSegments(uri, segments);
+    }
+
+    if (_endsWithSegments(segments, const ['v1', 'track'])) {
+      return _replacePathSegments(uri, [
+        ...segments.sublist(0, segments.length - 2),
+        'api',
+        'v1',
+      ]);
+    }
+
+    if (_endsWithSegments(segments, const ['v1'])) {
+      return _replacePathSegments(uri, [
+        ...segments.sublist(0, segments.length - 1),
+        'api',
+        'v1',
+      ]);
+    }
+
+    return _replacePathSegments(uri, [...segments, 'api', 'v1']);
+  }
+
+  @visibleForTesting
+  static Uri resolveTrackUri(String endpoint) {
+    final v1BaseUri = resolveV1BaseUri(endpoint);
+    return _appendPath(v1BaseUri, const ['track']);
+  }
+
+  @visibleForTesting
+  static Map<String, String> serializeTransportProperties(
+    Map<String, dynamic> properties,
+  ) {
+    return properties.map(
+      (key, value) => MapEntry(key, _serializeTransportValue(value)),
+    );
+  }
+
+  static Uri _appendPath(Uri uri, List<String> segments) {
+    final pathSegments = uri.pathSegments
+        .where((segment) => segment.isNotEmpty)
+        .toList();
+    return _replacePathSegments(uri, [...pathSegments, ...segments]);
+  }
+
+  static Uri _replacePathSegments(Uri uri, List<String> segments) {
+    return uri.replace(pathSegments: segments);
+  }
+
+  static bool _endsWithSegments(List<String> actual, List<String> suffix) {
+    if (actual.length < suffix.length) return false;
+    for (var index = 0; index < suffix.length; index++) {
+      if (actual[actual.length - suffix.length + index] != suffix[index]) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  static String _serializeTransportValue(dynamic value) {
+    if (value == null) return 'null';
+    if (value is String) return value;
+    if (value is num || value is bool) return value.toString();
+    if (value is DateTime) return value.toIso8601String();
+    if (value is Iterable || value is Map) {
+      return jsonEncode(_toEncodableJson(value));
+    }
+    return value.toString();
+  }
+
+  static dynamic _toEncodableJson(dynamic value) {
+    if (value == null || value is String || value is num || value is bool) {
+      return value;
+    }
+    if (value is DateTime) return value.toIso8601String();
+    if (value is Iterable) {
+      return value.map(_toEncodableJson).toList();
+    }
+    if (value is Map) {
+      return value.map(
+        (key, nestedValue) =>
+            MapEntry(key.toString(), _toEncodableJson(nestedValue)),
+      );
+    }
+    return value.toString();
   }
 }

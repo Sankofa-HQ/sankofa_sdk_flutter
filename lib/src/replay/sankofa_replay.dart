@@ -15,7 +15,6 @@ class SankofaReplay {
   static final SankofaReplay instance = SankofaReplay._internal();
   SankofaReplay._internal();
 
-  bool _isInit = false;
   bool _isRecording = false;
   bool _isCapturingFrame =
       false; // Add state to know *exactly* when we are painting for capture
@@ -25,6 +24,7 @@ class SankofaReplay {
   String _distinctId = 'anonymous';
   SankofaReplayMode _mode = SankofaReplayMode.wireframe;
   int _fps = 1;
+  bool _debug = false;
   Timer? _captureTimer;
   Timer? _highFidelityTimer;
 
@@ -42,12 +42,69 @@ class SankofaReplay {
   bool get isCapturingFrame => _isCapturingFrame;
   SankofaReplayMode get mode => _mode;
 
+  @visibleForTesting
+  String get currentSessionId => _sessionId;
+
+  @visibleForTesting
+  int get currentChunkIndex => _chunkIndex;
+
+  @visibleForTesting
+  bool get isRecordingForTesting => _isRecording;
+
   final List<_ReplayFrame> _frameBuffer = [];
   final List<Map<String, dynamic>> _eventBuffer = [];
   DateTime? _chunkStartTime;
 
   int _chunkIndex = 0;
   bool _isFlushing = false;
+
+  Future<void> configure({
+    required String apiKey,
+    required String endpoint,
+    required String sessionId,
+    String distinctId = 'anonymous',
+    SankofaReplayMode mode = SankofaReplayMode.wireframe,
+    int fps = 1,
+    bool debug = false,
+  }) async {
+    final configChanged =
+        _sessionId != sessionId ||
+        _endpoint != endpoint ||
+        _apiKey != apiKey ||
+        _mode != mode ||
+        _fps != fps;
+
+    if (_isRecording && configChanged) {
+      await _flush(force: true);
+      _captureTimer?.cancel();
+      _highFidelityTimer?.cancel();
+      _scrollDebounceTimer?.cancel();
+      _isRecording = false;
+      _isCapturingFrame = false;
+    }
+
+    _apiKey = apiKey;
+    _endpoint = endpoint;
+    _sessionId = sessionId;
+    _distinctId = distinctId;
+    _mode = mode;
+    _fps = fps;
+    _debug = debug;
+
+    // If we are already recording with the active configuration, only update identity/logging.
+    if (_isRecording && !configChanged) {
+      return;
+    }
+
+    final prefs = await SharedPreferences.getInstance();
+    final key = 'sankofa_replay_chunk_$_sessionId';
+    _chunkIndex = prefs.getInt(key) ?? 0;
+
+    _log(
+      '🎥 SankofaReplay: Configured with Session: $_sessionId and Endpoint: $_endpoint (Starting at Chunk $_chunkIndex)',
+    );
+    _startRecording();
+  }
 
   void init({
     required String apiKey,
@@ -56,26 +113,40 @@ class SankofaReplay {
     String distinctId = 'anonymous',
     SankofaReplayMode mode = SankofaReplayMode.wireframe,
     int fps = 1,
+    bool debug = false,
   }) {
-    if (_isInit) return;
-    _apiKey = apiKey;
-    _endpoint = endpoint;
-    _sessionId = sessionId;
-    _distinctId = distinctId;
-    _mode = mode;
-    _fps = fps;
-    _isInit = true;
+    unawaited(
+      configure(
+        apiKey: apiKey,
+        endpoint: endpoint,
+        sessionId: sessionId,
+        distinctId: distinctId,
+        mode: mode,
+        fps: fps,
+        debug: debug,
+      ),
+    );
+  }
 
-    // Load persisted chunk index to prevent Backblaze duplicates on hot restarts
-    SharedPreferences.getInstance().then((prefs) {
-      final key = 'sankofa_replay_chunk_$_sessionId';
-      _chunkIndex = prefs.getInt(key) ?? 0;
-
-      print(
-        '🎥 SankofaReplay: Initialized correctly with Session: $_sessionId and Endpoint: $_endpoint (Starting at Chunk $_chunkIndex)',
-      );
-      _startRecording();
-    });
+  @visibleForTesting
+  Future<void> resetForTesting() async {
+    _captureTimer?.cancel();
+    _highFidelityTimer?.cancel();
+    _scrollDebounceTimer?.cancel();
+    _frameBuffer.clear();
+    _eventBuffer.clear();
+    _chunkStartTime = null;
+    _chunkIndex = 0;
+    _isCapturingFrame = false;
+    _isFlushing = false;
+    _isRecording = false;
+    _apiKey = '';
+    _endpoint = '';
+    _sessionId = '';
+    _distinctId = 'anonymous';
+    _mode = SankofaReplayMode.wireframe;
+    _fps = 1;
+    _debug = false;
   }
 
   void setDistinctId(String distinctId) {
@@ -83,7 +154,7 @@ class SankofaReplay {
   }
 
   void _startRecording() {
-    if (_isRecording || !_isInit) return;
+    if (_isRecording || _sessionId.isEmpty || _endpoint.isEmpty) return;
     _isRecording = true;
     _chunkStartTime = DateTime.now();
 
@@ -109,7 +180,7 @@ class SankofaReplay {
   /// Temporarily switches the recording engine to high-fidelity (screenshot mode)
   /// for a set duration to capture critical visual states.
   void triggerHighFidelityMode(Duration duration) {
-    if (!_isInit || !_isRecording) return;
+    if (_sessionId.isEmpty || !_isRecording) return;
 
     // If already in screenshot mode, just extend the timer if applicable
     if (_mode == SankofaReplayMode.screenshot) {
@@ -118,7 +189,7 @@ class SankofaReplay {
       return;
     }
 
-    print(
+    _log(
       '🔥 SankofaReplay: High-Fidelity Trigger activated for ${duration.inSeconds} seconds!',
     );
 
@@ -142,7 +213,7 @@ class SankofaReplay {
   void _revertToWireframe() {
     if (_mode != SankofaReplayMode.screenshot || !_isRecording) return;
 
-    print(
+    _log(
       '🧊 SankofaReplay: High-Fidelity duration ended. Reverting to wireframe.',
     );
 
@@ -266,7 +337,6 @@ class SankofaReplay {
                 size.height > 0 &&
                 size.width < _screenWidth &&
                 size.height < _screenHeight) {
-              
               String nodeType = 'box';
               String? nodeValue;
 
@@ -275,13 +345,17 @@ class SankofaReplay {
                 nodeValue = widget.data ?? widget.textSpan?.toPlainText();
               } else if (widget is Image || widget is Icon) {
                 nodeType = 'media';
-              } else if (widget is ElevatedButton || widget is TextButton || widget is OutlinedButton || widget is FilledButton || widget is IconButton) {
+              } else if (widget is ElevatedButton ||
+                  widget is TextButton ||
+                  widget is OutlinedButton ||
+                  widget is FilledButton ||
+                  widget is IconButton) {
                 nodeType = 'button';
               }
 
               nodes.add({
                 't': nodeType,
-                if (nodeValue != null) 'v': nodeValue,
+                ...?nodeValue == null ? null : {'v': nodeValue},
                 'x': offset.dx.round(),
                 'y': offset.dy.round(),
                 'w': size.width.round(),
@@ -311,13 +385,13 @@ class SankofaReplay {
       });
 
       if (kDebugMode) {
-        print(
+        _log(
           '📐 SankofaReplay: Captured UI Blueprint with ${nodes.length} nodes',
         );
       }
     } catch (e) {
       if (kDebugMode) {
-        print('❌ SankofaReplay Blueprint Error: $e');
+        _log('❌ SankofaReplay Blueprint Error: $e');
       }
     }
   }
@@ -327,8 +401,9 @@ class SankofaReplay {
   void stopRecording() {
     _captureTimer?.cancel();
     _highFidelityTimer?.cancel();
+    _scrollDebounceTimer?.cancel();
     _isRecording = false;
-    _flush(force: true);
+    unawaited(_flush(force: true));
   }
 
   Future<void> _captureFrame() async {
@@ -344,11 +419,11 @@ class SankofaReplay {
           _repaintBoundaryKey.currentContext!.findRenderObject()
               as RenderRepaintBoundary?;
       if (boundary == null) {
-        print('❌ SankofaReplay: Boundary is null');
+        _log('❌ SankofaReplay: Boundary is null');
         return;
       }
       if (boundary.debugNeedsPaint) {
-        print(
+        _log(
           '⚠️ SankofaReplay: Skipped frame because boundary needs paint (animation running?)',
         );
         return;
@@ -366,7 +441,7 @@ class SankofaReplay {
         _frameBuffer.add(_ReplayFrame(DateTime.now(), bytes));
 
         if (_frameBuffer.length % 5 == 0) {
-          print('📸 SankofaReplay: Buffered ${_frameBuffer.length} frames');
+          _log('📸 SankofaReplay: Buffered ${_frameBuffer.length} frames');
         }
 
         // Lower threshold to 5 frames (5 seconds) for easier MVP testing
@@ -375,9 +450,7 @@ class SankofaReplay {
         }
       }
     } catch (e) {
-      print(
-        '❌ SankofaReplay Error capturing frame so we skipped this tick: $e',
-      );
+      _log('❌ SankofaReplay Error capturing frame so we skipped this tick: $e');
     } finally {
       _isCapturingFrame = false; // Always turn off the signal
     }
@@ -452,7 +525,7 @@ class SankofaReplay {
         final itemCount = _mode == SankofaReplayMode.screenshot
             ? framesToUpload.length
             : eventsToUpload.length;
-        print(
+        _log(
           '🚀 SankofaReplay: Uploaded ${_mode.name} chunk $_chunkIndex ($itemCount items)',
         );
         _chunkIndex++;
@@ -460,7 +533,7 @@ class SankofaReplay {
         final prefs = await SharedPreferences.getInstance();
         await prefs.setInt('sankofa_replay_chunk_$_sessionId', _chunkIndex);
       } else {
-        print('❌ SankofaReplay: Chunk upload failed: ${resp.statusCode}');
+        _log('❌ SankofaReplay: Chunk upload failed: ${resp.statusCode}');
         // 🛡️ CRITICAL: If upload fails (e.g., went into a tunnel), put data back!
         if (_mode == SankofaReplayMode.screenshot) {
           _frameBuffer.insertAll(0, framesToUpload);
@@ -469,7 +542,7 @@ class SankofaReplay {
         }
       }
     } catch (e) {
-      print('❌ SankofaReplay: flush error: $e');
+      _log('❌ SankofaReplay: flush error: $e');
       // 🛡️ CRITICAL: Network crash fallback
       if (_mode == SankofaReplayMode.screenshot) {
         _frameBuffer.insertAll(0, framesToUpload);
@@ -512,8 +585,11 @@ class SankofaReplayBoundary extends StatelessWidget {
         view.devicePixelRatio,
       );
     } catch (e) {
-      if (kDebugMode)
-        print('⚠️ SankofaReplay: Could not load screen dimensions');
+      if (kDebugMode) {
+        SankofaReplay.instance._log(
+          '⚠️ SankofaReplay: Could not load screen dimensions',
+        );
+      }
     }
 
     // Always include BOTH the RepaintBoundary (for Screenshot Mode)
@@ -524,7 +600,9 @@ class SankofaReplayBoundary extends StatelessWidget {
       child: NotificationListener<ScrollNotification>(
         onNotification: (ScrollNotification scrollInfo) {
           if (scrollInfo.depth == 0) {
-            SankofaReplay.instance._recordScrollEvent(scrollInfo.metrics.pixels);
+            SankofaReplay.instance._recordScrollEvent(
+              scrollInfo.metrics.pixels,
+            );
           }
           return false;
         },
@@ -550,17 +628,17 @@ class SankofaMask extends SingleChildRenderObjectWidget {
 
   @override
   RenderObject createRenderObject(BuildContext context) {
-    return _RenderSankofaMask();
+    return SankofaMaskRenderObject();
   }
 
   @override
   void updateRenderObject(
     BuildContext context,
-    _RenderSankofaMask renderObject,
+    SankofaMaskRenderObject renderObject,
   ) {}
 }
 
-class _RenderSankofaMask extends RenderProxyBox {
+class SankofaMaskRenderObject extends RenderProxyBox {
   @override
   void paint(PaintingContext context, Offset offset) {
     if (SankofaReplay.instance.isCapturingFrame) {
@@ -572,6 +650,14 @@ class _RenderSankofaMask extends RenderProxyBox {
       if (child != null) {
         context.paintChild(child!, offset);
       }
+    }
+  }
+}
+
+extension on SankofaReplay {
+  void _log(String value) {
+    if (_debug || kDebugMode) {
+      debugPrint(value);
     }
   }
 }
