@@ -342,6 +342,20 @@ class Sankofa with WidgetsBindingObserver {
     await _flush();
   }
 
+  /// Helper method to set common user properties (name, email, avatar)
+  Future<void> setPerson({
+    String? name,
+    String? email,
+    String? avatar,
+    Map<String, dynamic>? properties,
+  }) async {
+    final Map<String, dynamic> traits = {...(properties ?? {})};
+    if (name != null) traits[r'$name'] = name;
+    if (email != null) traits[r'$email'] = email;
+    if (avatar != null) traits[r'$avatar'] = avatar;
+    await peopleSet(traits);
+  }
+
   /// 🧠 Core Session Management Logic
   Future<void> _refreshSession() async {
     final prefs = await SharedPreferences.getInstance();
