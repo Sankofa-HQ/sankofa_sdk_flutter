@@ -63,7 +63,7 @@ class Sankofa with WidgetsBindingObserver {
   /// Initialize the SDK
   Future<void> init({
     required String apiKey,
-    String endpoint = 'http://localhost:8080',
+    String endpoint = 'https://api.sankofa.dev',
     bool debug = false,
     bool trackLifecycleEvents = true,
     bool enableSessionReplay = true,
