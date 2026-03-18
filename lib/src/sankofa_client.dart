@@ -14,7 +14,11 @@ import 'replay/sankofa_replay.dart';
 import 'utils/logger.dart';
 import 'utils/uri_helper.dart';
 
+/// The main entry point for the Sankofa Analytics SDK.
+///
+/// Use [Sankofa.instance] to access the singleton client.
 class Sankofa {
+  /// The singleton instance of the Sankofa client.
   static final Sankofa instance = Sankofa._internal();
   Sankofa._internal();
 
@@ -29,8 +33,18 @@ class Sankofa {
   bool _isInitialized = false;
   Timer? _flushTimer;
 
+  /// Returns true if the SDK has been initialized.
   bool get isInitialized => _isInitialized;
 
+  /// Initializes the Sankofa SDK with your [apiKey].
+  ///
+  /// Optional parameters:
+  /// - [endpoint]: The base URL of your Sankofa engine (defaults to api.sankofa.dev).
+  /// - [debug]: Enable verbose logging.
+  /// - [trackLifecycleEvents]: Automatically track app opened/foregrounded/backgrounded.
+  /// - [enableSessionReplay]: Enable recording of user sessions.
+  /// - [replayMode]: Choose between [SankofaReplayMode.wireframe] (default) or [SankofaReplayMode.screenshot].
+  /// - [replayFps]: The frame rate for session recording (defaults to 1 fps).
   Future<void> init({
     required String apiKey,
     String endpoint = 'https://api.sankofa.dev',
@@ -113,6 +127,7 @@ class Sankofa {
     _logger.log('⚡ Sankofa initialized');
   }
 
+  /// Tracks a custom event with optional [properties].
   Future<void> track(String eventName, [Map<String, dynamic>? properties]) async {
     if (!_isInitialized) {
       _logger.log('❌ Sankofa not initialized');
@@ -141,6 +156,9 @@ class Sankofa {
     }
   }
 
+  /// Identifies the current user with a unique [userId].
+  ///
+  /// This merges the anonymous session data with the identified user profile.
   Future<void> identify(String userId) async {
     if (!_isInitialized) return;
     await _identity.identify(userId, (event) => _queueManager.add(event));
@@ -148,6 +166,7 @@ class Sankofa {
     SankofaReplay.instance.setDistinctId(userId);
   }
 
+  /// Resets the current user identity and starts a fresh anonymous session.
   Future<void> reset() async {
     if (!_isInitialized) return;
     await _queueManager.flush();
@@ -155,6 +174,7 @@ class Sankofa {
     await _sessionManager.startNewSession();
   }
 
+  /// Sets profile attributes for the current user.
   Future<void> peopleSet(Map<String, dynamic> properties) async {
     if (!_isInitialized) return;
     final event = SankofaPeople.createProfileEvent(
@@ -165,6 +185,7 @@ class Sankofa {
     await _queueManager.flush();
   }
 
+  /// A convenience method to set common user traits like [name], [email], and [avatar].
   Future<void> setPerson({
     String? name,
     String? email,
@@ -180,11 +201,13 @@ class Sankofa {
     await peopleSet(traits);
   }
 
+  /// Forces an immediate upload of all queued events.
   Future<void> flush() async {
     if (!_isInitialized) return;
     await _queueManager.flush();
   }
 
+  /// Disposes of the SDK resources and stops all timers and recording.
   Future<void> dispose() async {
     _isInitialized = false;
     _flushTimer?.cancel();

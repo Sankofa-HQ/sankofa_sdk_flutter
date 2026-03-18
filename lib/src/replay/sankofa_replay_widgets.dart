@@ -4,9 +4,15 @@ import 'package:flutter/material.dart';
 
 import 'sankofa_replay_client.dart';
 
+/// A widget that defines the visual boundary for session replay recording.
+///
+/// This should typically wrap your [MaterialApp] or the root of your application
+/// to enable session capture and gesture tracking.
 class SankofaReplayBoundary extends StatelessWidget {
+  /// The widget below this boundary in the tree.
   final Widget child;
 
+  /// Creates a replay boundary.
   const SankofaReplayBoundary({super.key, required this.child});
 
   @override
@@ -50,6 +56,10 @@ class SankofaReplayBoundary extends StatelessWidget {
   }
 }
 
+/// A [NavigatorObserver] that automatically tracks screen changes for Sankofa Analytics.
+///
+/// Add this to your [MaterialApp.navigatorObservers] to enable automatic
+/// page view tracking and route-based session replay events.
 class SankofaNavigatorObserver extends RouteObserver<PageRoute<dynamic>> {
   @override
   void didPush(Route<dynamic> route, Route<dynamic>? previousRoute) {

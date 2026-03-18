@@ -5,9 +5,21 @@ import 'package:flutter/widgets.dart';
 import 'sankofa_replay_recorder.dart';
 import 'sankofa_replay_uploader.dart';
 
-enum SankofaReplayMode { wireframe, screenshot }
+/// The recording mode for session replay.
+enum SankofaReplayMode {
+  /// Renders a lightweight, privacy-focused wireframe of the UI.
+  wireframe,
 
+  /// Captures actual screenshots of the app (higher fidelity, higher bandwidth).
+  screenshot,
+}
+
+/// The controller for managing session replay and visual recording.
+///
+/// This is used internally by [Sankofa] but can also be accessed directly
+/// via [SankofaReplay.instance] for fine-grained control.
 class SankofaReplay {
+  /// The singleton instance of the Sankofa replay controller.
   static final SankofaReplay instance = SankofaReplay._internal();
   SankofaReplay._internal() {
     _uploader = SankofaReplayUploader(logger: _log);
@@ -22,7 +34,10 @@ class SankofaReplay {
   bool _debug = false;
 
   bool get isRecordingForTesting => _recorder.isRecording;
+  /// Returns true if a frame is currently being captured.
   bool get isCapturingFrame => _recorder.isCapturingFrame;
+
+  /// The current recording mode (wireframe or screenshot).
   SankofaReplayMode get mode => _recorder.mode;
   GlobalKey get rootBoundaryKey => _recorder.rootBoundaryKey;
 
@@ -37,6 +52,9 @@ class SankofaReplay {
     // Reset state if needed
   }
 
+  /// Configures the replay engine.
+  ///
+  /// This is typically called automatically by [Sankofa.init].
   Future<void> configure({
     required String apiKey,
     required String endpoint,
@@ -60,14 +78,19 @@ class SankofaReplay {
     );
   }
 
+  /// Updates the distinct ID for the current replay session.
   void setDistinctId(String distinctId) {
     _uploader.updateDistinctId(distinctId);
   }
 
+  /// Temporarily switches to high-fidelity [SankofaReplayMode.screenshot] mode
+  /// for the specified [duration]. This is useful for capturing critical errors
+  /// or specific user journeys in high detail.
   void triggerHighFidelityMode(Duration duration) {
     _recorder.triggerHighFidelityMode(duration);
   }
 
+  /// Stops the current recording session.
   void stopRecording() {
     _recorder.stopRecording();
   }

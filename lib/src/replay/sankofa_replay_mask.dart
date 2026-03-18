@@ -3,7 +3,12 @@ import 'package:flutter/rendering.dart';
 
 import 'sankofa_replay_client.dart';
 
+/// A widget that masks its child from being captured in session replays.
+///
+/// Use this to protect sensitive information like passwords or personal data.
+/// The child will be replaced by a solid black box in the recording.
 class SankofaMask extends SingleChildRenderObjectWidget {
+  /// Creates a mask for session replay.
   const SankofaMask({super.key, required Widget child}) : super(child: child);
 
   @override
