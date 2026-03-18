@@ -9,8 +9,8 @@ class SankofaNetworkInfo {
     try {
       // Check Wi-Fi vs Cellular
       final connectivityResult = await Connectivity().checkConnectivity();
-      props['\$wifi'] =
-          (connectivityResult == ConnectivityResult.wifi).toString();
+      props['\$wifi'] = (connectivityResult == ConnectivityResult.wifi)
+          .toString();
 
       // Check Telecom Carrier
       if (Platform.isAndroid) {
@@ -23,7 +23,7 @@ class SankofaNetworkInfo {
         final carrierData = await CarrierInfo.getIosInfo();
         if (carrierData.carrierData.isNotEmpty) {
           final name = carrierData.carrierData.first.carrierName;
-          props['\$carrier'] = name.isNotEmpty ? name : 'Unknown';
+          props['\$carrier'] = (name!.isNotEmpty ? name : 'Unknown');
         }
       }
     } catch (e) {
