@@ -63,7 +63,7 @@ class Sankofa {
 
     _logger = SankofaLogger(debug: debug);
     _identity = SankofaIdentity(logger: _logger);
-    
+
     final v1BaseUri = UriHelper.resolveV1BaseUri(endpoint);
     final trackUri = UriHelper.resolveTrackUri(endpoint);
     final serverBaseUri = UriHelper.resolveServerBaseUri(endpoint);
@@ -121,10 +121,10 @@ class Sankofa {
 
     await _identity.load();
     await _queueManager.load();
-    
+
     final deviceProps = await SankofaDeviceInfo.getProperties(_logger);
     _defaultProperties.addAll(deviceProps);
-    
+
     final networkProps = await SankofaNetworkInfo.getProperties(_logger);
     _defaultProperties.addAll(networkProps);
 
@@ -146,14 +146,17 @@ class Sankofa {
   }
 
   /// Tracks a custom event with optional [properties].
-  Future<void> track(String eventName, [Map<String, dynamic>? properties]) async {
+  Future<void> track(
+    String eventName, [
+    Map<String, dynamic>? properties,
+  ]) async {
     if (!_isInitialized) {
       _logger.log('❌ Sankofa not initialized');
       return;
     }
 
     await _sessionManager.refresh();
-    
+
     final networkProps = await SankofaNetworkInfo.getProperties(_logger);
     _defaultProperties.addAll(networkProps);
 
@@ -169,11 +172,12 @@ class Sankofa {
     _logger.log('📝 Tracked: $eventName');
 
     // Check for High Fidelity Triggers
-    if (_replayConfig != null && _replayConfig!.highFidelityTriggers.contains(eventName)) {
-        _logger.log('🚀 High Fidelity Trigger fired: $eventName');
-        SankofaReplay.instance.triggerHighFidelityMode(
-          Duration(seconds: _replayConfig!.highFidelityDurationSeconds),
-        );
+    if (_replayConfig != null &&
+        _replayConfig!.highFidelityTriggers.contains(eventName)) {
+      _logger.log('🚀 High Fidelity Trigger fired: $eventName');
+      SankofaReplay.instance.triggerHighFidelityMode(
+        Duration(seconds: _replayConfig!.highFidelityDurationSeconds),
+      );
     }
   }
 
@@ -228,10 +232,13 @@ class Sankofa {
     await _queueManager.flush();
   }
 
-  Future<SankofaReplayConfig?> _fetchReplayConfig(String apiKey, Uri baseUri) async {
+  Future<SankofaReplayConfig?> _fetchReplayConfig(
+    String apiKey,
+    Uri baseUri,
+  ) async {
     try {
       final response = await http.get(
-        baseUri.replace(path: '/api/v1/replay/config'),
+        baseUri.replace(path: '/api/replay/config'),
         headers: {'x-api-key': apiKey},
       ).timeout(const Duration(seconds: 5));
 
