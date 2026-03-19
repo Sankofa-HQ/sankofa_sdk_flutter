@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.0
+
+*   Added high-fidelity session replay mode.
+*   Implemented remote configuration fetching for dynamic sampling.
+*   Added event-based high-fidelity recording triggers.
+*   Updated dependency management for cleaner integration.
+
 ## 0.0.1
 
 * Initial release of Sankofa Flutter SDK.

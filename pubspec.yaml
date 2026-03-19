@@ -1,6 +1,6 @@
 name: sankofa_flutter
 description: "Flutter client SDK for Sankofa Analytics with offline queueing and session replay."
-version: 0.0.1
+version: 0.1.0
 homepage: https://sankofa.dev
 repository: https://github.com/Sankofa-HQ/sankofa_sdk_flutter
 issue_tracker: https://github.com/Sankofa-HQ/sankofa_sdk_flutter/issues
