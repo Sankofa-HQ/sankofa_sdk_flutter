@@ -1,4 +1,7 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:math';
+import 'package:http/http.dart' as http;
 
 import 'sankofa_constants.dart';
 import 'sankofa_deep_links.dart';
@@ -11,6 +14,7 @@ import 'sankofa_queue_manager.dart';
 import 'sankofa_session_manager.dart';
 import 'sankofa_track.dart';
 import 'replay/sankofa_replay.dart';
+import 'replay/sankofa_replay_config.dart';
 import 'utils/logger.dart';
 import 'utils/uri_helper.dart';
 
@@ -30,6 +34,7 @@ class Sankofa {
   late SankofaLifecycleObserver _lifecycleObserver;
 
   final Map<String, String> _defaultProperties = {};
+  SankofaReplayConfig? _replayConfig;
   bool _isInitialized = false;
   Timer? _flushTimer;
 
@@ -73,17 +78,30 @@ class Sankofa {
     _sessionManager = SankofaSessionManager(
       logger: _logger,
       onNewSession: () async {
-        if (enableSessionReplay) {
-          await SankofaReplay.instance.configure(
-            apiKey: apiKey,
-            endpoint: serverBaseUri.toString(),
-            sessionId: _sessionManager.sessionId!,
-            distinctId: _identity.distinctId,
-            mode: replayMode,
-            fps: replayFps,
-            debug: debug,
-          );
+        if (!enableSessionReplay) return;
+
+        // Remote Configuration Sync
+        _replayConfig = await _fetchReplayConfig(apiKey, serverBaseUri);
+        final config = _replayConfig ?? SankofaReplayConfig.defaults();
+
+        if (!config.enabled) return;
+
+        // Client-side Sampling
+        final shouldRecord = Random().nextDouble() < config.sampleRate;
+        if (!shouldRecord) {
+          _logger.log('Session sampled out (Rate: ${config.sampleRate})');
+          return;
         }
+
+        await SankofaReplay.instance.configure(
+          apiKey: apiKey,
+          endpoint: serverBaseUri.toString(),
+          sessionId: _sessionManager.sessionId!,
+          distinctId: _identity.distinctId,
+          mode: replayMode,
+          fps: replayFps,
+          debug: debug,
+        );
       },
     );
 
@@ -150,9 +168,12 @@ class Sankofa {
     await _queueManager.add(event);
     _logger.log('📝 Tracked: $eventName');
 
-    if (SankofaReplay.instance.isRecordingForTesting && 
-        const ['purchase_error', 'checkout_started', 'app_crash'].contains(eventName)) {
-       SankofaReplay.instance.triggerHighFidelityMode(const Duration(seconds: 30));
+    // Check for High Fidelity Triggers
+    if (_replayConfig != null && _replayConfig!.highFidelityTriggers.contains(eventName)) {
+        _logger.log('🚀 High Fidelity Trigger fired: $eventName');
+        SankofaReplay.instance.triggerHighFidelityMode(
+          Duration(seconds: _replayConfig!.highFidelityDurationSeconds),
+        );
     }
   }
 
@@ -205,6 +226,23 @@ class Sankofa {
   Future<void> flush() async {
     if (!_isInitialized) return;
     await _queueManager.flush();
+  }
+
+  Future<SankofaReplayConfig?> _fetchReplayConfig(String apiKey, Uri baseUri) async {
+    try {
+      final response = await http.get(
+        baseUri.replace(path: '/api/v1/replay/config'),
+        headers: {'x-api-key': apiKey},
+      ).timeout(const Duration(seconds: 5));
+
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        return SankofaReplayConfig.fromJson(data);
+      }
+    } catch (e) {
+      _logger.log('⚠️ Failed to fetch replay config: $e');
+    }
+    return null;
   }
 
   /// Disposes of the SDK resources and stops all timers and recording.
