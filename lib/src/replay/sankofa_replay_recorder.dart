@@ -6,6 +6,7 @@ import 'dart:ui' as ui;
 
 import 'sankofa_replay_client.dart';
 import 'sankofa_replay_uploader.dart';
+import '../sankofa_client.dart';
 
 class SankofaReplayRecorder {
   final void Function(String) logger;
@@ -108,14 +109,21 @@ class SankofaReplayRecorder {
 
   // --- Capture Logic ---
 
+  double _currentScrollY = 0;
+
   Future<void> _captureFrame() async {
     if (rootBoundaryKey.currentContext == null) return;
     _isCapturingFrame = true;
-    await Future.microtask(() {});
-
+    
     try {
       final boundary = rootBoundaryKey.currentContext!.findRenderObject() as RenderRepaintBoundary?;
-      if (boundary == null || boundary.debugNeedsPaint) return;
+      if (boundary == null) return;
+
+      // 🚀 THE FIX: If it's dirty, wait for the next frame before snapping!
+      // This prevents capturing a partial/wireframe frame during animations.
+      if (boundary.debugNeedsPaint) {
+        await Future.delayed(const Duration(milliseconds: 20)); 
+      }
 
       final image = await boundary.toImage(pixelRatio: 0.5);
       final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
@@ -180,6 +188,7 @@ class SankofaReplayRecorder {
       rootBoundaryKey.currentContext!.visitChildElements(walkTree);
       _eventBuffer.add({
         'type': 'ui_snapshot',
+        'screen': Sankofa.instance.currentScreen,
         'time_offset_ms': DateTime.now().difference(_chunkStartTime!).inMilliseconds,
         'nodes': nodes,
       });
@@ -195,30 +204,41 @@ class SankofaReplayRecorder {
   }
 
   void recordPointerEvent(String type, PointerEvent event) {
-    if (_mode != SankofaReplayMode.wireframe || !_isRecording) return;
+    if (!_isRecording) return;
+
+    // 🚀 Absolute Y = Screen position + Current Scroll Offset
+    final absoluteY = event.position.dy + _currentScrollY;
+
     _eventBuffer.add({
       'type': type,
       'x': event.position.dx,
       'y': event.position.dy,
+      'abs_y': absoluteY, // Heatmap will use this!
+      'scroll_y': _currentScrollY,
+      'screen': Sankofa.instance.currentScreen, // 🔥 Stateful screen tagging
       'time_offset_ms': DateTime.now().difference(_chunkStartTime!).inMilliseconds,
     });
   }
 
   void recordRouteEvent(String routeName) {
-    if (_mode != SankofaReplayMode.wireframe || !_isRecording) return;
+    if (!_isRecording) return;
     _eventBuffer.add({
       'type': 'route_change',
       'route': routeName,
+      'screen': routeName,
       'time_offset_ms': DateTime.now().difference(_chunkStartTime!).inMilliseconds,
     });
     Future.delayed(const Duration(milliseconds: 500), _captureUIBlueprint);
   }
 
   void recordScrollEvent(double scrollY) {
+    _currentScrollY = scrollY; // 🚀 Keep track of exactly where we are
+
     if (_mode != SankofaReplayMode.wireframe || !_isRecording) return;
     _eventBuffer.add({
       'type': 'scroll',
       'y': scrollY,
+      'screen': Sankofa.instance.currentScreen,
       'time_offset_ms': DateTime.now().difference(_chunkStartTime!).inMilliseconds,
     });
     _scrollDebounceTimer?.cancel();

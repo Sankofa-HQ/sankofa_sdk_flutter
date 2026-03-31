@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'sankofa_constants.dart';
 import 'sankofa_deep_links.dart';
@@ -34,6 +35,9 @@ class Sankofa {
   late SankofaLifecycleObserver _lifecycleObserver;
 
   final Map<String, String> _defaultProperties = {};
+  String _currentScreen = 'Unknown';
+  String get currentScreen => _currentScreen;
+
   SankofaReplayConfig? _replayConfig;
   bool _isInitialized = false;
   Timer? _flushTimer;
@@ -113,6 +117,7 @@ class Sankofa {
 
     _lifecycleObserver = SankofaLifecycleObserver(
       logger: _logger,
+      sessionManager: _sessionManager,
       track: (name) => track(name),
       flush: () => _queueManager.flush(),
       trackLifecycleEvents: trackLifecycleEvents,
@@ -129,6 +134,15 @@ class Sankofa {
     _defaultProperties.addAll(networkProps);
 
     await _sessionManager.refresh();
+    
+    // First Time Open Logic
+    final prefs = await SharedPreferences.getInstance();
+    const firstOpenKey = 'dev.sankofa.first_open_detected';
+    if (!(prefs.getBool(firstOpenKey) ?? false)) {
+      await prefs.setBool(firstOpenKey, true);
+      await track('\$app_open_first_time');
+    }
+
     _deepLinks.init();
     _lifecycleObserver.init();
 
@@ -137,12 +151,26 @@ class Sankofa {
       (_) => _queueManager.flush(),
     );
 
-    if (trackLifecycleEvents) {
-      await track('\$app_opened');
-    }
+    await track('\$session_start');
 
     _isInitialized = true;
     _logger.log('⚡ Sankofa initialized');
+  }
+  
+  /// Explicitly tag the screen the user is currently viewing.
+  /// Crucial for building accurate Heatmaps in the Dashboard.
+  Future<void> screen(String screenName, [Map<String, dynamic>? properties]) async {
+    if (!_isInitialized) return;
+    
+    _currentScreen = screenName;
+    _defaultProperties['\$screen_name'] = screenName;
+
+    // Fire a standard screen_view event
+    final screenProps = properties ?? {};
+    screenProps['\$screen_name'] = screenName;
+    
+    await track('\$screen_view', screenProps);
+    _logger.log('📍 Screen changed to: $screenName');
   }
 
   /// Tracks a custom event with optional [properties].
@@ -150,22 +178,29 @@ class Sankofa {
     String eventName, [
     Map<String, dynamic>? properties,
   ]) async {
-    if (!_isInitialized) {
+    if (!_isInitialized && (eventName != '\$app_open_first_time' && eventName != '\$session_start')) {
       _logger.log('❌ Sankofa not initialized');
       return;
     }
 
-    await _sessionManager.refresh();
+    // Refresh only if not initialized yet (for first internal events) or normally
+    if (_isInitialized) await _sessionManager.refresh();
 
     final networkProps = await SankofaNetworkInfo.getProperties(_logger);
     _defaultProperties.addAll(networkProps);
+
+    // Manual > Auto Injection
+    final eventProps = properties ?? {};
+    if (!eventProps.containsKey('\$screen_name')) {
+      eventProps['\$screen_name'] = _currentScreen;
+    }
 
     final event = SankofaTrack.createEvent(
       eventName: eventName,
       distinctId: _identity.distinctId,
       sessionId: _sessionManager.sessionId!,
       defaultProperties: _defaultProperties,
-      properties: properties,
+      properties: eventProps,
     );
 
     await _queueManager.add(event);
