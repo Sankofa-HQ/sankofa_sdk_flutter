@@ -18,7 +18,8 @@ class SankofaTrack {
       'event_name': eventName,
       'distinct_id': distinctId,
       'properties': {
-        '\$session_id': sessionId,
+        r'$event_name': eventName,
+        r'$session_id': sessionId,
         ...serializedProperties,
       },
       'default_properties': defaultProperties,

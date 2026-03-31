@@ -4,12 +4,16 @@ import 'utils/serialization_helper.dart';
 class SankofaPeople {
   static Map<String, dynamic> createProfileEvent({
     required String distinctId,
+    required String sessionId,
     required Map<String, dynamic> properties,
   }) {
     return {
       'type': 'people',
       'distinct_id': distinctId,
-      'properties': SerializationHelper.serializeTransportProperties(properties),
+      'properties': {
+        r'$session_id': sessionId,
+        ...SerializationHelper.serializeTransportProperties(properties),
+      },
       'timestamp': DateTime.now().toIso8601String(),
       'message_id': const Uuid().v4(),
     };

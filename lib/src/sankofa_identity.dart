@@ -24,7 +24,7 @@ class SankofaIdentity {
     _userId = prefs.getString(kUserIdKey);
   }
 
-  Future<void> identify(String userId, Future<void> Function(Map<String, dynamic> aliasEvent) onAlias) async {
+  Future<void> identify(String userId, String sessionId, Future<void> Function(Map<String, dynamic> aliasEvent) onAlias) async {
     if (_userId == userId) return;
 
     final previousId = distinctId;
@@ -38,6 +38,9 @@ class SankofaIdentity {
         'type': 'alias',
         'alias_id': previousId,
         'distinct_id': userId,
+        'properties': {
+          r'$session_id': sessionId,
+        },
         'timestamp': DateTime.now().toIso8601String(),
         'message_id': const Uuid().v4(),
       };

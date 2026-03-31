@@ -53,39 +53,134 @@ class SankofaQueueManager {
     if (_isFlushing || _queue.isEmpty) return;
     _isFlushing = true;
 
-    final batch = List<Map<String, dynamic>>.from(_queue);
-    final failedEvents = <Map<String, dynamic>>[];
+    try {
+      // Snapshot the queue and clear immediately to avoid duplicates
+      final batch = List<Map<String, dynamic>>.from(_queue);
+      _queue.clear();
+      await _persist();
 
-    for (final event in batch) {
-      try {
-        Uri url = trackUri;
-        if (event['type'] == 'alias') {
-          url = UriHelper.appendPath(v1BaseUri, const ['alias']);
-        } else if (event['type'] == 'people') {
-          url = UriHelper.appendPath(v1BaseUri, const ['people']);
+      // Separate events by type for batched endpoints
+      final trackEvents = <Map<String, dynamic>>[];
+      final aliasEvents = <Map<String, dynamic>>[];
+      final peopleEvents = <Map<String, dynamic>>[];
+
+      for (final event in batch) {
+        switch (event['type']) {
+          case 'alias':
+            aliasEvents.add(event);
+            break;
+          case 'people':
+            peopleEvents.add(event);
+            break;
+          default:
+            trackEvents.add(event);
         }
+      }
 
-        final res = await http.post(
-          url,
-          headers: {'Content-Type': 'application/json', 'x-api-key': apiKey},
-          body: jsonEncode(event),
-        );
+      final failedEvents = <Map<String, dynamic>>[];
 
-        if (res.statusCode != 200) {
-          logger.log('❌ Failed to send ${event['type']}: ${res.statusCode}');
-          failedEvents.add(event);
-        } else {
+      // Batch send track events in a single request
+      if (trackEvents.isNotEmpty) {
+        final failed = await _sendBatch(trackEvents, trackUri);
+        failedEvents.addAll(failed);
+      }
+
+      // Batch send alias events
+      if (aliasEvents.isNotEmpty) {
+        final aliasUrl = UriHelper.appendPath(v1BaseUri, const ['alias']);
+        final failed = await _sendBatch(aliasEvents, aliasUrl);
+        failedEvents.addAll(failed);
+      }
+
+      // Batch send people events
+      if (peopleEvents.isNotEmpty) {
+        final peopleUrl = UriHelper.appendPath(v1BaseUri, const ['people']);
+        final failed = await _sendBatch(peopleEvents, peopleUrl);
+        failedEvents.addAll(failed);
+      }
+
+      // Re-queue any failed events for retry
+      if (failedEvents.isNotEmpty) {
+        _queue.insertAll(0, failedEvents);
+        await _persist();
+        logger.log('⚠️ ${failedEvents.length} events re-queued for retry');
+      }
+    } catch (e) {
+      logger.log('❌ Flush error: $e');
+    } finally {
+      _isFlushing = false;
+    }
+  }
+
+  /// Sends a batch of events to the given [url] in a single HTTP request.
+  /// Returns any events that failed to send (for retry).
+  Future<List<Map<String, dynamic>>> _sendBatch(
+    List<Map<String, dynamic>> events,
+    Uri url,
+  ) async {
+    try {
+      final res = await http
+          .post(
+            url,
+            headers: {
+              'Content-Type': 'application/json',
+              'x-api-key': apiKey,
+            },
+            body: jsonEncode({'batch': events}),
+          )
+          .timeout(const Duration(seconds: 15));
+
+      if (res.statusCode == 200 || res.statusCode == 202) {
+        logger.log('✅ Batch sent: ${events.length} events to $url');
+        return [];
+      }
+
+      // If the server doesn't support batch, fall back to individual sends
+      if (res.statusCode == 400 || res.statusCode == 404) {
+        logger.log('⚠️ Batch endpoint not supported, falling back to individual sends');
+        return _sendIndividually(events, url);
+      }
+
+      logger.log('❌ Batch send failed (${res.statusCode}): ${events.length} events');
+      return events; // Re-queue all on server error
+    } catch (e) {
+      logger.log('❌ Network error during batch send: $e');
+      return events; // Re-queue all on network error
+    }
+  }
+
+  /// Fallback: sends events one-by-one if batch endpoint isn't available.
+  Future<List<Map<String, dynamic>>> _sendIndividually(
+    List<Map<String, dynamic>> events,
+    Uri url,
+  ) async {
+    final failed = <Map<String, dynamic>>[];
+
+    for (final event in events) {
+      try {
+        final res = await http
+            .post(
+              url,
+              headers: {
+                'Content-Type': 'application/json',
+                'x-api-key': apiKey,
+              },
+              body: jsonEncode(event),
+            )
+            .timeout(const Duration(seconds: 10));
+
+        if (res.statusCode == 200 || res.statusCode == 202) {
           logger.log('✅ Sent ${event['type']}');
+        } else {
+          logger.log('❌ Failed to send ${event['type']}: ${res.statusCode}');
+          failed.add(event);
         }
       } catch (e) {
         logger.log('❌ Network error: $e');
-        failedEvents.add(event);
+        failed.add(event);
       }
     }
 
-    _queue.clear();
-    _queue.addAll(failedEvents);
-    await _persist();
-    _isFlushing = false;
+    return failed;
   }
 }

@@ -186,7 +186,11 @@ class Sankofa {
   /// This merges the anonymous session data with the identified user profile.
   Future<void> identify(String userId) async {
     if (!_isInitialized) return;
-    await _identity.identify(userId, (event) => _queueManager.add(event));
+    await _identity.identify(
+      userId,
+      _sessionManager.sessionId!,
+      (event) => _queueManager.add(event),
+    );
     await _queueManager.flush();
     SankofaReplay.instance.setDistinctId(userId);
   }
@@ -204,6 +208,7 @@ class Sankofa {
     if (!_isInitialized) return;
     final event = SankofaPeople.createProfileEvent(
       distinctId: _identity.distinctId,
+      sessionId: _sessionManager.sessionId!,
       properties: properties,
     );
     await _queueManager.add(event);
