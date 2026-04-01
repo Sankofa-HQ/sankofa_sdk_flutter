@@ -77,6 +77,7 @@ class Sankofa {
       apiKey: apiKey,
       v1BaseUri: v1BaseUri,
       trackUri: trackUri,
+      onCommands: (commands) => _handleServerCommands(commands),
     );
 
     _sessionManager = SankofaSessionManager(
@@ -299,5 +300,21 @@ class Sankofa {
     _deepLinks.dispose();
     _lifecycleObserver.dispose();
     SankofaReplay.instance.stopRecording();
+  }
+
+  void _handleServerCommands(List<dynamic> commands) {
+    for (final cmd in commands) {
+      if (cmd is! Map<String, dynamic>) continue;
+      final type = cmd['type'] as String?;
+      final params = cmd['params'] as Map<String, dynamic>?;
+
+      if (type == 'CAPTURE_PRISTINE' && params != null) {
+        final screen = params['screen'] as String?;
+        if (screen != null) {
+          _logger.log('🔥 📸 Server requested pristine capture for screen: $screen');
+          SankofaReplay.instance.triggerHighFidelityMode(const Duration(seconds: 1));
+        }
+      }
+    }
   }
 }

@@ -12,12 +12,14 @@ class SankofaQueueManager {
   final Uri trackUri;
   final List<Map<String, dynamic>> _queue = [];
   bool _isFlushing = false;
+  void Function(List<dynamic>)? onCommands;
 
   SankofaQueueManager({
     required this.logger,
     required this.apiKey,
     required this.v1BaseUri,
     required this.trackUri,
+    this.onCommands,
   });
 
   int get length => _queue.length;
@@ -132,6 +134,17 @@ class SankofaQueueManager {
 
       if (res.statusCode == 200 || res.statusCode == 202) {
         logger.log('✅ Batch sent: ${events.length} events to $url');
+        
+        // 🎮 Process Commands
+        try {
+          final data = jsonDecode(res.body);
+          if (data['commands'] != null && onCommands != null) {
+            onCommands!(data['commands'] as List<dynamic>);
+          }
+        } catch (e) {
+          // Response body might not be JSON or might be empty
+        }
+
         return [];
       }
 
@@ -171,6 +184,16 @@ class SankofaQueueManager {
 
         if (res.statusCode == 200 || res.statusCode == 202) {
           logger.log('✅ Sent ${event['type']}');
+          
+          // 🎮 Process Commands
+          try {
+            final data = jsonDecode(res.body);
+            if (data['commands'] != null && onCommands != null) {
+              onCommands!(data['commands'] as List<dynamic>);
+            }
+          } catch (e) {
+            // ...
+          }
         } else {
           logger.log('❌ Failed to send ${event['type']}: ${res.statusCode}');
           failed.add(event);
