@@ -286,8 +286,12 @@ class SankofaReplayRecorder {
 
     if (_mode != SankofaReplayMode.wireframe || !_isRecording) return;
     _eventBuffer.add({
-      'type': 'scroll',
-      'y': scrollY,
+      'type': 3, // rrweb IncrementalSnapshot
+      'timestamp': DateTime.now().millisecondsSinceEpoch,
+      'data': {
+        'source': 3, // Scroll
+        'y': scrollY,
+      },
       'screen': Sankofa.instance.currentScreen,
       'time_offset_ms': DateTime.now()
           .difference(_chunkStartTime!)

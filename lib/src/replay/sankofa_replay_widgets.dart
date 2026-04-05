@@ -35,11 +35,9 @@ class SankofaReplayBoundary extends StatelessWidget {
       key: SankofaReplay.instance.rootBoundaryKey,
       child: NotificationListener<ScrollNotification>(
         onNotification: (ScrollNotification scrollInfo) {
-          if (scrollInfo.depth == 0) {
-            SankofaReplay.instance.recordScrollEvent(
-              scrollInfo.metrics.pixels,
-            );
-          }
+          SankofaReplay.instance.recordScrollEvent(
+            scrollInfo.metrics.pixels,
+          );
           return false;
         },
         child: Listener(
