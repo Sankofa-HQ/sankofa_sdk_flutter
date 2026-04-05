@@ -106,6 +106,7 @@ class Sankofa {
           mode: replayMode,
           fps: replayFps,
           debug: debug,
+          deviceProperties: _defaultProperties,
         );
       },
     );

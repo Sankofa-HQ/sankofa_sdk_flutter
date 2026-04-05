@@ -29,6 +29,7 @@ class SankofaReplayRecorder {
   final List<Uint8List> _frameBuffer = [];
   final List<Map<String, dynamic>> _eventBuffer = [];
   DateTime? _chunkStartTime;
+  bool _isBlueprintRunning = false;
 
   SankofaReplayRecorder({required this.logger, required this.uploader});
 
@@ -143,21 +144,28 @@ class SankofaReplayRecorder {
       _isCapturingFrame = false;
     }
   }
-
+  
   void _captureUIBlueprint() {
-    if (_mode != SankofaReplayMode.wireframe || !_isRecording) return;
-    if (rootBoundaryKey.currentContext == null) return;
+    if (_isBlueprintRunning) return;
+    _isBlueprintRunning = true;
 
     try {
       final rootRenderObject = rootBoundaryKey.currentContext!
           .findRenderObject();
-      if (rootRenderObject == null) return;
+      if (rootRenderObject == null) {
+        _isBlueprintRunning = false;
+        return;
+      }
 
       final List<Map<String, dynamic>> nodes = [];
 
       void walkTree(Element element) {
+        if (nodes.length > 250) return; // 🛑 HARD LIMIT: Don't choke on giant lists
+
         final widget = element.widget;
         final renderObject = element.renderObject;
+
+        // Skip internal/invisible elements
         final isLeaf =
             widget is Text ||
             widget is Image ||
@@ -173,10 +181,12 @@ class SankofaReplayRecorder {
             );
             final size = renderObject.size;
 
-            if (size.width > 0 &&
-                size.height > 0 &&
-                size.width < _screenWidth &&
-                size.height < _screenHeight) {
+            // 🔦 VISIBILITY GUARD: Skip off-screen elements
+            if (offset.dx < _screenWidth &&
+                offset.dy < _screenHeight &&
+                offset.dx + size.width > 0 &&
+                offset.dy + size.height > 0) {
+              
               String type = 'box';
               String? value;
               if (widget is Text) {
@@ -191,10 +201,10 @@ class SankofaReplayRecorder {
               nodes.add({
                 't': type,
                 if (value != null) 'v': value,
-                'x': offset.dx.round(),
-                'y': offset.dy.round(),
-                'w': size.width.round(),
-                'h': size.height.round(),
+                'x': offset.dx, // 🎯 DOUBLE PRECISION
+                'y': offset.dy,
+                'w': size.width,
+                'h': size.height,
               });
             }
           } catch (_) {}
@@ -213,6 +223,8 @@ class SankofaReplayRecorder {
       });
     } catch (e) {
       logger('❌ Blueprint error: $e');
+    } finally {
+      _isBlueprintRunning = false;
     }
   }
 
@@ -299,6 +311,10 @@ class SankofaReplayRecorder {
       _mode = SankofaReplayMode.screenshot;
       _chunkStartTime = DateTime.now();
       _captureTimer?.cancel();
+      
+      // 📸 Capture AND Flush immediately on trigger!
+      _captureFrame().then((_) => flush(force: true));
+
       final fpsDuration = Duration(milliseconds: (1000 / _fps).round());
       _captureTimer = Timer.periodic(fpsDuration, (_) => _captureFrame());
       _highFidelityTimer = Timer(duration, _revertToWireframe);

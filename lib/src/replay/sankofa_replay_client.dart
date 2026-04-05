@@ -63,6 +63,7 @@ class SankofaReplay {
     SankofaReplayMode mode = SankofaReplayMode.wireframe,
     int fps = 1,
     bool debug = false,
+    Map<String, String> deviceProperties = const {},
   }) async {
     _debug = debug;
     _uploader.updateConfig(
@@ -70,6 +71,7 @@ class SankofaReplay {
       endpoint: endpoint,
       sessionId: sessionId,
       distinctId: distinctId,
+      deviceProperties: deviceProperties,
     );
     await _recorder.configure(
       mode: mode,

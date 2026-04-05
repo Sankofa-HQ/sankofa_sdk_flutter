@@ -20,6 +20,8 @@ class SankofaSessionManager {
 
     if (_sessionId == null) {
       await startNewSession();
+    } else {
+      await onNewSession();
     }
   }
 

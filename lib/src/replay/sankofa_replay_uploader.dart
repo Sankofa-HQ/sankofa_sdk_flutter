@@ -18,14 +18,18 @@ class SankofaReplayUploader {
 
   String get sessionId => _sessionId;
   int get chunkIndex => _chunkIndex;
+  String get _os => Platform.operatingSystem.toLowerCase();
 
   SankofaReplayUploader({required this.logger});
+
+  Map<String, String> _deviceProperties = {};
 
   void updateConfig({
     required String apiKey,
     required String endpoint,
     required String sessionId,
     required String distinctId,
+    Map<String, String> deviceProperties = const {},
   }) {
     if (_sessionId != sessionId) {
       _sessionId = sessionId;
@@ -34,6 +38,7 @@ class SankofaReplayUploader {
     _apiKey = apiKey;
     _endpoint = endpoint;
     _distinctId = distinctId;
+    _deviceProperties = deviceProperties;
   }
 
   void updateDistinctId(String id) => _distinctId = id;
@@ -54,29 +59,41 @@ class SankofaReplayUploader {
     _isUploading = true;
 
     try {
+      final appVersion = _deviceProperties['\$app_version'] ?? 'unknown';
       final deviceContextWithOs = {
         ...deviceContext,
-        '\$os': Platform.isAndroid ? 'Android' : (Platform.isIOS ? 'iOS' : 'Web')
+        '\$os': _os,
+        '\$app_version': appVersion,
       };
 
       final payload = {
+        'session_id': _sessionId,
+        'distinct_id': _distinctId,
+        'chunk_index': _chunkIndex,
+        'mode': mode.name,
+        // Keep underscores for backend Body Peeking (Legacy & Reliability)
         '_session_id': _sessionId,
         '_distinct_id': _distinctId,
         '_chunk_index': _chunkIndex,
         '_replay_mode': mode.name,
+        '\$app_version': appVersion,
         'meta': {
           'current_screen': Sankofa.instance.currentScreen,
         },
         'device_context': deviceContextWithOs,
         'events': events,
-        if (mode == SankofaReplayMode.screenshot)
-          'frames': frames.map((f) => {
-            'timestamp': DateTime.now().toUtc().millisecondsSinceEpoch, 
-            'image_base64': base64Encode(f),
-          }).toList()
-        else
-          'chunk_start_timestamp': startTime?.toUtc().millisecondsSinceEpoch ?? DateTime.now().toUtc().millisecondsSinceEpoch,
       };
+
+      if (mode == SankofaReplayMode.screenshot) {
+        logger('🚀 Replay: Uploading screenshot chunk ($_chunkIndex) with ${frames.length} frames');
+        payload['frames'] = frames.map((f) => {
+          'timestamp': DateTime.now().toUtc().millisecondsSinceEpoch, 
+          'image_base64': base64Encode(f),
+          'screen': Sankofa.instance.currentScreen,
+        }).toList();
+      } else {
+        payload['chunk_start_timestamp'] = startTime?.toUtc().millisecondsSinceEpoch ?? DateTime.now().toUtc().millisecondsSinceEpoch;
+      }
 
       final compressedBody = GZipCodec().encode(utf8.encode(jsonEncode(payload)));
       final uri = Uri.parse('$_endpoint/api/ee/replay/chunk');
