@@ -60,7 +60,7 @@ class Sankofa {
     bool debug = false,
     bool trackLifecycleEvents = true,
     bool enableSessionReplay = true,
-    SankofaReplayMode replayMode = SankofaReplayMode.wireframe,
+    SankofaReplayMode replayMode = SankofaReplayMode.screenshot,
     int replayFps = 1,
   }) async {
     if (_isInitialized) await dispose();

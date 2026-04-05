@@ -125,13 +125,13 @@ class SankofaReplayRecorder {
               as RenderRepaintBoundary?;
       if (boundary == null) return;
 
-      // 🚀 THE FIX: If it's dirty, wait for the next frame before snapping!
-      // This prevents capturing a partial/wireframe frame during animations.
+      // 🚀 THE FIX: If it's dirty, wait for a few frames before snapping!
+      // This ensures we capture the 'final' rendered state for heatmaps.
       if (boundary.debugNeedsPaint) {
-        await Future.delayed(const Duration(milliseconds: 20));
+        await Future.delayed(const Duration(milliseconds: 100));
       }
 
-      final image = await boundary.toImage(pixelRatio: 0.5);
+      final image = await boundary.toImage(pixelRatio: 0.7);
       final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
 
       if (byteData != null) {

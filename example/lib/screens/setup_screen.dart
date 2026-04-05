@@ -9,7 +9,8 @@ class SetupScreen extends StatefulWidget {
   State<SetupScreen> createState() => _SetupScreenState();
 }
 
-class _SetupScreenState extends State<SetupScreen> with SingleTickerProviderStateMixin {
+class _SetupScreenState extends State<SetupScreen>
+    with SingleTickerProviderStateMixin {
   static const _engineUrlFieldKey = Key('setup-engine-url-field');
   static const _apiKeyFieldKey = Key('setup-api-key-field');
   static const _connectButtonKey = Key('setup-connect-button');
@@ -18,14 +19,18 @@ class _SetupScreenState extends State<SetupScreen> with SingleTickerProviderStat
     return 'http://172.20.10.6:8080';
   }
 
-  late final _engineUrlController = TextEditingController(text: _getDefaultEngineUrl());
-  final _apiKeyController = TextEditingController(text: 'sk_test_b25f965d194d55bd071fb23921401e7c');
+  late final _engineUrlController = TextEditingController(
+    text: _getDefaultEngineUrl(),
+  );
+  final _apiKeyController = TextEditingController(
+    text: 'sk_test_b25f965d194d55bd071fb23921401e7c',
+  );
 
   bool _connecting = false;
   bool _debugMode = true;
   bool _trackLifecycleEvents = true;
   bool _enableSessionReplay = true;
-  SankofaReplayMode _replayMode = SankofaReplayMode.wireframe;
+  final SankofaReplayMode _replayMode = SankofaReplayMode.screenshot;
 
   late AnimationController _pulseController;
   late Animation<double> _pulseAnimation;
@@ -33,8 +38,13 @@ class _SetupScreenState extends State<SetupScreen> with SingleTickerProviderStat
   @override
   void initState() {
     super.initState();
-    _pulseController = AnimationController(vsync: this, duration: const Duration(seconds: 2))..repeat(reverse: true);
-    _pulseAnimation = Tween<double>(begin: 0.6, end: 1.0).animate(CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut));
+    _pulseController = AnimationController(
+      vsync: this,
+      duration: const Duration(seconds: 2),
+    )..repeat(reverse: true);
+    _pulseAnimation = Tween<double>(begin: 0.6, end: 1.0).animate(
+      CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut),
+    );
   }
 
   @override
@@ -50,7 +60,12 @@ class _SetupScreenState extends State<SetupScreen> with SingleTickerProviderStat
     final key = _apiKeyController.text.trim();
 
     if (url.isEmpty || key.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: const Text('Please fill in both fields'), backgroundColor: Colors.red.shade700));
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: const Text('Please fill in both fields'),
+          backgroundColor: Colors.red.shade700,
+        ),
+      );
       return;
     }
 
@@ -65,11 +80,18 @@ class _SetupScreenState extends State<SetupScreen> with SingleTickerProviderStat
         replayMode: _replayMode,
       );
       if (!mounted) return;
-      Navigator.of(context).pushReplacement(MaterialPageRoute(builder: (_) => const EventTesterScreen()));
+      Navigator.of(context).pushReplacement(
+        MaterialPageRoute(builder: (_) => const EventTesterScreen()),
+      );
     } catch (e) {
       if (!mounted) return;
       setState(() => _connecting = false);
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Connection failed: $e'), backgroundColor: Colors.red.shade700));
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Connection failed: $e'),
+          backgroundColor: Colors.red.shade700,
+        ),
+      );
     }
   }
 
@@ -84,9 +106,25 @@ class _SetupScreenState extends State<SetupScreen> with SingleTickerProviderStat
             children: [
               _buildLogo(),
               const SizedBox(height: 24),
-              const Text('Sankofa', style: TextStyle(fontSize: 32, fontWeight: FontWeight.w800, letterSpacing: -0.5, color: Colors.white)),
+              const Text(
+                'Sankofa',
+                style: TextStyle(
+                  fontSize: 32,
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: -0.5,
+                  color: Colors.white,
+                ),
+              ),
               const SizedBox(height: 6),
-              Text('Multi-Screen Showcase', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w500, color: Colors.white.withValues(alpha: 0.4), letterSpacing: 2)),
+              Text(
+                'Multi-Screen Showcase',
+                style: TextStyle(
+                  fontSize: 15,
+                  fontWeight: FontWeight.w500,
+                  color: Colors.white.withValues(alpha: 0.4),
+                  letterSpacing: 2,
+                ),
+              ),
               const SizedBox(height: 48),
               _buildConfigCard(),
               const SizedBox(height: 28),
@@ -101,15 +139,29 @@ class _SetupScreenState extends State<SetupScreen> with SingleTickerProviderStat
   Widget _buildLogo() {
     return AnimatedBuilder(
       animation: _pulseAnimation,
-      builder: (context, child) => Opacity(opacity: _pulseAnimation.value, child: child),
+      builder: (context, child) =>
+          Opacity(opacity: _pulseAnimation.value, child: child),
       child: Container(
-        width: 80, height: 80,
+        width: 80,
+        height: 80,
         decoration: BoxDecoration(
           shape: BoxShape.circle,
-          gradient: const LinearGradient(colors: [Color(0xFF6C5CE7), Color(0xFFA29BFE)]),
-          boxShadow: [BoxShadow(color: const Color(0xFF6C5CE7).withValues(alpha: 0.4), blurRadius: 24, spreadRadius: 2)],
+          gradient: const LinearGradient(
+            colors: [Color(0xFF6C5CE7), Color(0xFFA29BFE)],
+          ),
+          boxShadow: [
+            BoxShadow(
+              color: const Color(0xFF6C5CE7).withValues(alpha: 0.4),
+              blurRadius: 24,
+              spreadRadius: 2,
+            ),
+          ],
         ),
-        child: const Icon(Icons.analytics_rounded, color: Colors.white, size: 40),
+        child: const Icon(
+          Icons.analytics_rounded,
+          color: Colors.white,
+          size: 40,
+        ),
       ),
     );
   }
@@ -117,53 +169,126 @@ class _SetupScreenState extends State<SetupScreen> with SingleTickerProviderStat
   Widget _buildConfigCard() {
     return Container(
       padding: const EdgeInsets.all(24),
-      decoration: BoxDecoration(color: const Color(0xFF1A1A2E), borderRadius: BorderRadius.circular(20), border: Border.all(color: Colors.white.withValues(alpha: 0.06))),
+      decoration: BoxDecoration(
+        color: const Color(0xFF1A1A2E),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.06)),
+      ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           _buildFieldLabel('Engine URL'),
           const SizedBox(height: 8),
           TextField(
-            key: _engineUrlFieldKey, controller: _engineUrlController,
-            decoration: const InputDecoration(hintText: 'http://localhost:8080', prefixIcon: Icon(Icons.dns_rounded, size: 20, color: Color(0xFF6C5CE7))),
+            key: _engineUrlFieldKey,
+            controller: _engineUrlController,
+            decoration: const InputDecoration(
+              hintText: 'http://localhost:8080',
+              prefixIcon: Icon(
+                Icons.dns_rounded,
+                size: 20,
+                color: Color(0xFF6C5CE7),
+              ),
+            ),
           ),
           const SizedBox(height: 18),
           _buildFieldLabel('API Key'),
           const SizedBox(height: 8),
           SankofaMask(
             child: TextField(
-              key: _apiKeyFieldKey, controller: _apiKeyController, obscureText: true,
-              decoration: const InputDecoration(hintText: 'sk_test_...', prefixIcon: Icon(Icons.key_rounded, size: 20, color: Color(0xFF6C5CE7))),
+              key: _apiKeyFieldKey,
+              controller: _apiKeyController,
+              obscureText: true,
+              decoration: const InputDecoration(
+                hintText: 'sk_test_...',
+                prefixIcon: Icon(
+                  Icons.key_rounded,
+                  size: 20,
+                  color: Color(0xFF6C5CE7),
+                ),
+              ),
             ),
           ),
           const SizedBox(height: 18),
-          _buildToggle('Debug Mode', _debugMode, (v) => setState(() => _debugMode = v), Icons.bug_report_rounded),
-          _buildToggle('Track Lifecycle', _trackLifecycleEvents, (v) => setState(() => _trackLifecycleEvents = v), Icons.history_toggle_off_rounded),
-          _buildToggle('Session Replay', _enableSessionReplay, (v) => setState(() => _enableSessionReplay = v), Icons.videocam_rounded),
+          _buildToggle(
+            'Debug Mode',
+            _debugMode,
+            (v) => setState(() => _debugMode = v),
+            Icons.bug_report_rounded,
+          ),
+          _buildToggle(
+            'Track Lifecycle',
+            _trackLifecycleEvents,
+            (v) => setState(() => _trackLifecycleEvents = v),
+            Icons.history_toggle_off_rounded,
+          ),
+          _buildToggle(
+            'Session Replay',
+            _enableSessionReplay,
+            (v) => setState(() => _enableSessionReplay = v),
+            Icons.videocam_rounded,
+          ),
         ],
       ),
     );
   }
 
-  Widget _buildToggle(String label, bool value, ValueChanged<bool> onChanged, IconData icon) {
+  Widget _buildToggle(
+    String label,
+    bool value,
+    ValueChanged<bool> onChanged,
+    IconData icon,
+  ) {
     return Row(
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
       children: [
-        Row(children: [Icon(icon, size: 18, color: Colors.white.withValues(alpha: 0.5)), const SizedBox(width: 8), Text(label, style: const TextStyle(color: Colors.white, fontSize: 14))]),
-        Switch(value: value, onChanged: onChanged, activeThumbColor: const Color(0xFF6C5CE7)),
+        Row(
+          children: [
+            Icon(icon, size: 18, color: Colors.white.withValues(alpha: 0.5)),
+            const SizedBox(width: 8),
+            Text(
+              label,
+              style: const TextStyle(color: Colors.white, fontSize: 14),
+            ),
+          ],
+        ),
+        Switch(
+          value: value,
+          onChanged: onChanged,
+          activeThumbColor: const Color(0xFF6C5CE7),
+        ),
       ],
     );
   }
 
-  Widget _buildFieldLabel(String label) => Text(label, style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Colors.white.withValues(alpha: 0.6)));
+  Widget _buildFieldLabel(String label) => Text(
+    label,
+    style: TextStyle(
+      fontSize: 13,
+      fontWeight: FontWeight.w600,
+      color: Colors.white.withValues(alpha: 0.6),
+    ),
+  );
 
   Widget _buildConnectButton() {
     return SizedBox(
-      width: double.infinity, height: 52,
+      width: double.infinity,
+      height: 52,
       child: FilledButton(
-        key: _connectButtonKey, onPressed: _connecting ? null : _connect,
-        style: FilledButton.styleFrom(backgroundColor: const Color(0xFF6C5CE7), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14))),
-        child: _connecting ? const CircularProgressIndicator(color: Colors.white) : const Text('Initialize & Connect', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+        key: _connectButtonKey,
+        onPressed: _connecting ? null : _connect,
+        style: FilledButton.styleFrom(
+          backgroundColor: const Color(0xFF6C5CE7),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(14),
+          ),
+        ),
+        child: _connecting
+            ? const CircularProgressIndicator(color: Colors.white)
+            : const Text(
+                'Initialize & Connect',
+                style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+              ),
       ),
     );
   }
