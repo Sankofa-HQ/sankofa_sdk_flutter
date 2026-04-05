@@ -23,9 +23,9 @@ class SankofaTrack {
         ...serializedProperties,
       },
       'default_properties': defaultProperties,
-      'timestamp': DateTime.now().toIso8601String(),
+      'timestamp': '${DateTime.now().toUtc().toIso8601String().split('.')[0]}Z',
       'lib_version': 'flutter-0.1.0',
-      'message_id': const Uuid().v4(),
+      'id': const Uuid().v4(),
     };
   }
 }

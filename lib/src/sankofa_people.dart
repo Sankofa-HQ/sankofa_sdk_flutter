@@ -14,8 +14,8 @@ class SankofaPeople {
         r'$session_id': sessionId,
         ...SerializationHelper.serializeTransportProperties(properties),
       },
-      'timestamp': DateTime.now().toIso8601String(),
-      'message_id': const Uuid().v4(),
+      'timestamp': '${DateTime.now().toUtc().toIso8601String().split('.')[0]}Z',
+      'id': const Uuid().v4(),
     };
   }
 

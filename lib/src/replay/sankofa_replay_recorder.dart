@@ -16,7 +16,7 @@ class SankofaReplayRecorder {
   bool _isCapturingFrame = false;
   SankofaReplayMode _mode = SankofaReplayMode.wireframe;
   int _fps = 1;
-  
+
   Timer? _captureTimer;
   Timer? _highFidelityTimer;
   Timer? _scrollDebounceTimer;
@@ -65,7 +65,10 @@ class SankofaReplayRecorder {
       final duration = Duration(milliseconds: (1000 / _fps).round());
       _captureTimer = Timer.periodic(duration, (_) => _captureFrame());
     } else {
-      _captureTimer = Timer.periodic(const Duration(seconds: 10), (_) => flush());
+      _captureTimer = Timer.periodic(
+        const Duration(seconds: 10),
+        (_) => flush(),
+      );
       Future.delayed(const Duration(seconds: 1), _captureUIBlueprint);
     }
   }
@@ -114,15 +117,17 @@ class SankofaReplayRecorder {
   Future<void> _captureFrame() async {
     if (rootBoundaryKey.currentContext == null) return;
     _isCapturingFrame = true;
-    
+
     try {
-      final boundary = rootBoundaryKey.currentContext!.findRenderObject() as RenderRepaintBoundary?;
+      final boundary =
+          rootBoundaryKey.currentContext!.findRenderObject()
+              as RenderRepaintBoundary?;
       if (boundary == null) return;
 
       // 🚀 THE FIX: If it's dirty, wait for the next frame before snapping!
       // This prevents capturing a partial/wireframe frame during animations.
       if (boundary.debugNeedsPaint) {
-        await Future.delayed(const Duration(milliseconds: 20)); 
+        await Future.delayed(const Duration(milliseconds: 20));
       }
 
       final image = await boundary.toImage(pixelRatio: 0.5);
@@ -144,7 +149,8 @@ class SankofaReplayRecorder {
     if (rootBoundaryKey.currentContext == null) return;
 
     try {
-      final rootRenderObject = rootBoundaryKey.currentContext!.findRenderObject();
+      final rootRenderObject = rootBoundaryKey.currentContext!
+          .findRenderObject();
       if (rootRenderObject == null) return;
 
       final List<Map<String, dynamic>> nodes = [];
@@ -152,14 +158,25 @@ class SankofaReplayRecorder {
       void walkTree(Element element) {
         final widget = element.widget;
         final renderObject = element.renderObject;
-        final isLeaf = widget is Text || widget is Image || widget is Icon || widget is ButtonStyleButton || widget is IconButton;
+        final isLeaf =
+            widget is Text ||
+            widget is Image ||
+            widget is Icon ||
+            widget is ButtonStyleButton ||
+            widget is IconButton;
 
         if (isLeaf && renderObject is RenderBox && renderObject.hasSize) {
           try {
-            final offset = renderObject.localToGlobal(Offset.zero, ancestor: rootRenderObject);
+            final offset = renderObject.localToGlobal(
+              Offset.zero,
+              ancestor: rootRenderObject,
+            );
             final size = renderObject.size;
 
-            if (size.width > 0 && size.height > 0 && size.width < _screenWidth && size.height < _screenHeight) {
+            if (size.width > 0 &&
+                size.height > 0 &&
+                size.width < _screenWidth &&
+                size.height < _screenHeight) {
               String type = 'box';
               String? value;
               if (widget is Text) {
@@ -189,7 +206,9 @@ class SankofaReplayRecorder {
       _eventBuffer.add({
         'type': 'ui_snapshot',
         'screen': Sankofa.instance.currentScreen,
-        'time_offset_ms': DateTime.now().difference(_chunkStartTime!).inMilliseconds,
+        'time_offset_ms': DateTime.now()
+            .difference(_chunkStartTime!)
+            .inMilliseconds,
         'nodes': nodes,
       });
     } catch (e) {
@@ -200,7 +219,9 @@ class SankofaReplayRecorder {
   // --- Event Recording ---
 
   void updateDeviceContext(double w, double h, double pr) {
-    _screenWidth = w; _screenHeight = h; _pixelRatio = pr;
+    _screenWidth = w;
+    _screenHeight = h;
+    _pixelRatio = pr;
   }
 
   void recordPointerEvent(String type, PointerEvent event) {
@@ -209,14 +230,29 @@ class SankofaReplayRecorder {
     // 🚀 Absolute Y = Screen position + Current Scroll Offset
     final absoluteY = event.position.dy + _currentScrollY;
 
+    int rrwebType = 1;
+    if (type == 'pointer_up') {
+      rrwebType = 0;
+    } else if (type == 'pointer_move') {
+      rrwebType = 6;
+    } else if (type == 'pointer_pan_zoom') {
+      rrwebType = 7;
+    }
+
     _eventBuffer.add({
-      'type': type,
-      'x': event.position.dx,
-      'y': event.position.dy,
-      'abs_y': absoluteY, // Heatmap will use this!
-      'scroll_y': _currentScrollY,
+      'type': 3, // rrweb IncrementalSnapshot
+      'timestamp': DateTime.now().millisecondsSinceEpoch,
+      'data': {
+        'source': 2, // MouseInteraction
+        'type': rrwebType,
+        'id': 1,
+        'x': event.position.dx,
+        'y': absoluteY, // Heatmap will use this!
+      },
       'screen': Sankofa.instance.currentScreen, // 🔥 Stateful screen tagging
-      'time_offset_ms': DateTime.now().difference(_chunkStartTime!).inMilliseconds,
+      'time_offset_ms': DateTime.now()
+          .difference(_chunkStartTime!)
+          .inMilliseconds,
     });
   }
 
@@ -226,7 +262,9 @@ class SankofaReplayRecorder {
       'type': 'route_change',
       'route': routeName,
       'screen': routeName,
-      'time_offset_ms': DateTime.now().difference(_chunkStartTime!).inMilliseconds,
+      'time_offset_ms': DateTime.now()
+          .difference(_chunkStartTime!)
+          .inMilliseconds,
     });
     Future.delayed(const Duration(milliseconds: 500), _captureUIBlueprint);
   }
@@ -239,10 +277,15 @@ class SankofaReplayRecorder {
       'type': 'scroll',
       'y': scrollY,
       'screen': Sankofa.instance.currentScreen,
-      'time_offset_ms': DateTime.now().difference(_chunkStartTime!).inMilliseconds,
+      'time_offset_ms': DateTime.now()
+          .difference(_chunkStartTime!)
+          .inMilliseconds,
     });
     _scrollDebounceTimer?.cancel();
-    _scrollDebounceTimer = Timer(const Duration(milliseconds: 500), _captureUIBlueprint);
+    _scrollDebounceTimer = Timer(
+      const Duration(milliseconds: 500),
+      _captureUIBlueprint,
+    );
   }
 
   void triggerHighFidelityMode(Duration duration) {
@@ -267,7 +310,10 @@ class SankofaReplayRecorder {
       _mode = SankofaReplayMode.wireframe;
       _chunkStartTime = DateTime.now();
       _captureTimer?.cancel();
-      _captureTimer = Timer.periodic(const Duration(seconds: 10), (_) => flush());
+      _captureTimer = Timer.periodic(
+        const Duration(seconds: 10),
+        (_) => flush(),
+      );
     });
   }
 }

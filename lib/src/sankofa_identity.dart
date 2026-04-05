@@ -41,8 +41,8 @@ class SankofaIdentity {
         'properties': {
           r'$session_id': sessionId,
         },
-        'timestamp': DateTime.now().toIso8601String(),
-        'message_id': const Uuid().v4(),
+        'timestamp': '${DateTime.now().toUtc().toIso8601String().split('.')[0]}Z',
+        'id': const Uuid().v4(),
       };
       await onAlias(aliasEvent);
       logger.log('🔗 Identify: Aliasing $previousId -> $userId');

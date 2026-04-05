@@ -61,129 +61,35 @@ class SankofaQueueManager {
       _queue.clear();
       await _persist();
 
-      // Separate events by type for batched endpoints
-      final trackEvents = <Map<String, dynamic>>[];
-      final aliasEvents = <Map<String, dynamic>>[];
-      final peopleEvents = <Map<String, dynamic>>[];
+      // Transform generic events into unified Batch Operations format required by Backend
+      final operations = batch.map((event) {
+        String opType = 'track';
+        if (event['type'] == 'alias') opType = 'alias';
+        if (event['type'] == 'people') opType = 'people';
+        return {
+          'type': opType,
+          'payload': event,
+        };
+      }).toList();
 
-      for (final event in batch) {
-        switch (event['type']) {
-          case 'alias':
-            aliasEvents.add(event);
-            break;
-          case 'people':
-            peopleEvents.add(event);
-            break;
-          default:
-            trackEvents.add(event);
-        }
-      }
-
-      final failedEvents = <Map<String, dynamic>>[];
-
-      // Batch send track events in a single request
-      if (trackEvents.isNotEmpty) {
-        final failed = await _sendBatch(trackEvents, trackUri);
-        failedEvents.addAll(failed);
-      }
-
-      // Batch send alias events
-      if (aliasEvents.isNotEmpty) {
-        final aliasUrl = UriHelper.appendPath(v1BaseUri, const ['alias']);
-        final failed = await _sendBatch(aliasEvents, aliasUrl);
-        failedEvents.addAll(failed);
-      }
-
-      // Batch send people events
-      if (peopleEvents.isNotEmpty) {
-        final peopleUrl = UriHelper.appendPath(v1BaseUri, const ['people']);
-        final failed = await _sendBatch(peopleEvents, peopleUrl);
-        failedEvents.addAll(failed);
-      }
-
-      // Re-queue any failed events for retry
-      if (failedEvents.isNotEmpty) {
-        _queue.insertAll(0, failedEvents);
-        await _persist();
-        logger.log('⚠️ ${failedEvents.length} events re-queued for retry');
-      }
-    } catch (e) {
-      logger.log('❌ Flush error: $e');
-    } finally {
-      _isFlushing = false;
-    }
-  }
-
-  /// Sends a batch of events to the given [url] in a single HTTP request.
-  /// Returns any events that failed to send (for retry).
-  Future<List<Map<String, dynamic>>> _sendBatch(
-    List<Map<String, dynamic>> events,
-    Uri url,
-  ) async {
-    try {
-      final res = await http
-          .post(
-            url,
-            headers: {
-              'Content-Type': 'application/json',
-              'x-api-key': apiKey,
-            },
-            body: jsonEncode({'batch': events}),
-          )
-          .timeout(const Duration(seconds: 15));
-
-      if (res.statusCode == 200 || res.statusCode == 202) {
-        logger.log('✅ Batch sent: ${events.length} events to $url');
-        
-        // 🎮 Process Commands
-        try {
-          final data = jsonDecode(res.body);
-          if (data['commands'] != null && onCommands != null) {
-            onCommands!(data['commands'] as List<dynamic>);
-          }
-        } catch (e) {
-          // Response body might not be JSON or might be empty
-        }
-
-        return [];
-      }
-
-      // If the server doesn't support batch, fall back to individual sends
-      if (res.statusCode == 400 || res.statusCode == 404) {
-        logger.log('⚠️ Batch endpoint not supported, falling back to individual sends');
-        return _sendIndividually(events, url);
-      }
-
-      logger.log('❌ Batch send failed (${res.statusCode}): ${events.length} events');
-      return events; // Re-queue all on server error
-    } catch (e) {
-      logger.log('❌ Network error during batch send: $e');
-      return events; // Re-queue all on network error
-    }
-  }
-
-  /// Fallback: sends events one-by-one if batch endpoint isn't available.
-  Future<List<Map<String, dynamic>>> _sendIndividually(
-    List<Map<String, dynamic>> events,
-    Uri url,
-  ) async {
-    final failed = <Map<String, dynamic>>[];
-
-    for (final event in events) {
+      final batchUrl = UriHelper.appendPath(v1BaseUri, const ['batch']);
+      final body = jsonEncode({'operations': operations});
+      logger.log('📤 Flushing ${operations.length} events...');
+      
       try {
         final res = await http
             .post(
-              url,
+              batchUrl,
               headers: {
                 'Content-Type': 'application/json',
                 'x-api-key': apiKey,
               },
-              body: jsonEncode(event),
+              body: body,
             )
-            .timeout(const Duration(seconds: 10));
+            .timeout(const Duration(seconds: 15));
 
         if (res.statusCode == 200 || res.statusCode == 202) {
-          logger.log('✅ Sent ${event['type']}');
+          logger.log('✅ Batch sent: ${operations.length} events to $batchUrl');
           
           // 🎮 Process Commands
           try {
@@ -192,18 +98,23 @@ class SankofaQueueManager {
               onCommands!(data['commands'] as List<dynamic>);
             }
           } catch (e) {
-            // ...
+            // Unparsable JSON
           }
         } else {
-          logger.log('❌ Failed to send ${event['type']}: ${res.statusCode}');
-          failed.add(event);
+          logger.log('❌ Batch send failed (${res.statusCode})');
+          _queue.insertAll(0, batch);
+          await _persist();
         }
       } catch (e) {
-        logger.log('❌ Network error: $e');
-        failed.add(event);
+        logger.log('❌ Network error during batch send: $e');
+        _queue.insertAll(0, batch);
+        await _persist();
       }
-    }
 
-    return failed;
+    } catch (e) {
+      logger.log('❌ Flush error: $e');
+    } finally {
+      _isFlushing = false;
+    }
   }
 }

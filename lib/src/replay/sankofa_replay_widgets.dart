@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import 'sankofa_replay_client.dart';
+import '../sankofa_client.dart';
 
 /// A widget that defines the visual boundary for session replay recording.
 ///
@@ -49,6 +50,8 @@ class SankofaReplayBoundary extends StatelessWidget {
               SankofaReplay.instance.recordPointerEvent('pointer_move', e),
           onPointerUp: (e) =>
               SankofaReplay.instance.recordPointerEvent('pointer_up', e),
+          onPointerPanZoomUpdate: (e) =>
+              SankofaReplay.instance.recordPointerEvent('pointer_pan_zoom', e),
           child: child,
         ),
       ),
@@ -66,6 +69,7 @@ class SankofaNavigatorObserver extends RouteObserver<PageRoute<dynamic>> {
     super.didPush(route, previousRoute);
     if (route.settings.name != null) {
       SankofaReplay.instance.recordRouteEvent(route.settings.name!);
+      Sankofa.instance.screen(route.settings.name!);
     }
   }
 
@@ -74,6 +78,7 @@ class SankofaNavigatorObserver extends RouteObserver<PageRoute<dynamic>> {
     super.didReplace(newRoute: newRoute, oldRoute: oldRoute);
     if (newRoute?.settings.name != null) {
       SankofaReplay.instance.recordRouteEvent(newRoute!.settings.name!);
+      Sankofa.instance.screen(newRoute.settings.name!);
     }
   }
 
@@ -82,6 +87,7 @@ class SankofaNavigatorObserver extends RouteObserver<PageRoute<dynamic>> {
     super.didPop(route, previousRoute);
     if (previousRoute?.settings.name != null) {
       SankofaReplay.instance.recordRouteEvent(previousRoute!.settings.name!);
+      Sankofa.instance.screen(previousRoute.settings.name!);
     }
   }
 }

@@ -92,14 +92,16 @@ class _SetupScreenState extends State<SetupScreen>
   String _getDefaultEngineUrl() {
     // if (kIsWeb) return 'http://localhost:8080';
     // if (Platform.isAndroid) return 'http://10.0.2.2:8080';
-    // return 'http://127.0.0.1:8080';
-    return 'https://api.sankofa.dev';
+    return 'http://172.20.10.6:8080';
+    // return 'https://api.sankofa.dev';
   }
 
   late final _engineUrlController = TextEditingController(
     text: _getDefaultEngineUrl(),
   );
-  final _apiKeyController = TextEditingController();
+  final _apiKeyController = TextEditingController(
+    text: 'sk_test_b25f965d194d55bd071fb23921401e7c',
+  );
 
   bool _connecting = false;
   bool _debugMode = true;
@@ -1031,6 +1033,21 @@ class _EventTesterScreenState extends State<EventTesterScreen> {
                   color: const Color(0xFF00CEC9),
                   onTap: _simulateUserJourney,
                 ),
+                _QuickActionChip(
+                  label: 'UI Stress Test',
+                  icon: Icons.dashboard_customize_rounded,
+                  color: const Color(0xFFD63031),
+                  onTap: () {
+                    Navigator.of(context).push(
+                      MaterialPageRoute(
+                        builder: (_) => const AnimationStressTestScreen(),
+                        settings: const RouteSettings(
+                          name: "AnimationStressTestScreen",
+                        ),
+                      ),
+                    );
+                  },
+                ),
               ],
             ),
 
@@ -1197,6 +1214,171 @@ class _QuickActionChip extends StatelessWidget {
               ),
             ],
           ),
+        ),
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// STRESS TEST SCREEN — Deep scroll, intense animations, and zoom properties
+// ─────────────────────────────────────────────────────────────────────────────
+
+class AnimationStressTestScreen extends StatefulWidget {
+  const AnimationStressTestScreen({super.key});
+
+  @override
+  State<AnimationStressTestScreen> createState() =>
+      _AnimationStressTestScreenState();
+}
+
+class _AnimationStressTestScreenState extends State<AnimationStressTestScreen>
+    with SingleTickerProviderStateMixin {
+  late AnimationController _rotationController;
+
+  @override
+  void initState() {
+    super.initState();
+    _rotationController = AnimationController(
+      vsync: this,
+      duration: const Duration(seconds: 4),
+    )..repeat();
+  }
+
+  @override
+  void dispose() {
+    _rotationController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFF0F0F1A),
+      appBar: AppBar(
+        title: const Text(
+          'UI Stress Testing',
+          style: TextStyle(fontWeight: FontWeight.bold),
+        ),
+        backgroundColor: const Color(0xFF16162A),
+      ),
+      body: SingleChildScrollView(
+        child: Column(
+          children: [
+            // Rotational Animation Test (Forces continuous repaints)
+            Container(
+              padding: const EdgeInsets.all(32),
+              color: const Color(0xFF1A1A2E),
+              child: Center(
+                child: AnimatedBuilder(
+                  animation: _rotationController,
+                  builder: (context, child) {
+                    return Transform.rotate(
+                      angle: _rotationController.value * 2 * pi,
+                      child: GestureDetector(
+                        onTap: () =>
+                            Sankofa.instance.track("tapped_rotating_box"),
+                        child: Container(
+                          width: 150,
+                          height: 150,
+                          decoration: BoxDecoration(
+                            gradient: const LinearGradient(
+                              colors: [Colors.purple, Colors.orange],
+                            ),
+                            borderRadius: BorderRadius.circular(20),
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.purple.withValues(alpha: 0.5),
+                                blurRadius: 20,
+                              ),
+                            ],
+                          ),
+                          child: const Center(
+                            child: Text(
+                              "Tap Me!\n(Repainting...)",
+                              textAlign: TextAlign.center,
+                            ),
+                          ),
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              ),
+            ),
+
+            // Pan & Zoom Test (Pinch/Zoom targeting)
+            Container(
+              height: 300,
+              width: double.infinity,
+              color: Colors.black26,
+              child: InteractiveViewer(
+                boundaryMargin: const EdgeInsets.all(100),
+                minScale: 0.5,
+                maxScale: 4.0,
+                child: Center(
+                  child: GestureDetector(
+                    onTap: () => Sankofa.instance.track("tapped_zoom_target"),
+                    child: Container(
+                      width: 200,
+                      height: 150,
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF00B894),
+                        borderRadius: BorderRadius.circular(16),
+                      ),
+                      child: const Center(
+                        child: Text(
+                          "InteractiveViewer\nPan & Zoom Me!",
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                            fontWeight: FontWeight.bold,
+                            fontSize: 16,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+
+            // Deep Scroll Test
+            const Padding(
+              padding: EdgeInsets.all(20),
+              child: Text(
+                "Deep Scroll Physics Rendering Validation",
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+            ListView.builder(
+              shrinkWrap: true,
+              physics:
+                  const NeverScrollableScrollPhysics(), // Scroll managed by outer SingleChildScrollView
+              itemCount: 50,
+              itemBuilder: (context, index) {
+                return ListTile(
+                  leading: CircleAvatar(
+                    backgroundColor:
+                        Colors.primaries[index % Colors.primaries.length],
+                  ),
+                  title: Text(
+                    "Heatmap Target Item #$index",
+                    style: const TextStyle(color: Colors.white70),
+                  ),
+                  trailing: const Icon(Icons.touch_app, color: Colors.white24),
+                  onTap: () {
+                    Sankofa.instance.track("list_item_tapped", {
+                      "index": index,
+                    });
+                  },
+                );
+              },
+            ),
+          ],
         ),
       ),
     );

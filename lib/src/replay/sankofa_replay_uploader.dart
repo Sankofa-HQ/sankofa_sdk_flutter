@@ -5,6 +5,7 @@ import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'sankofa_replay_client.dart';
+import '../sankofa_client.dart';
 
 class SankofaReplayUploader {
   final void Function(String) logger;
@@ -53,20 +54,28 @@ class SankofaReplayUploader {
     _isUploading = true;
 
     try {
+      final deviceContextWithOs = {
+        ...deviceContext,
+        '\$os': Platform.isAndroid ? 'Android' : (Platform.isIOS ? 'iOS' : 'Web')
+      };
+
       final payload = {
-        'session_id': _sessionId,
-        'chunk_index': _chunkIndex,
-        'mode': mode.name,
+        '_session_id': _sessionId,
+        '_distinct_id': _distinctId,
+        '_chunk_index': _chunkIndex,
+        '_replay_mode': mode.name,
+        'meta': {
+          'current_screen': Sankofa.instance.currentScreen,
+        },
+        'device_context': deviceContextWithOs,
+        'events': events,
         if (mode == SankofaReplayMode.screenshot)
           'frames': frames.map((f) => {
-            'timestamp': DateTime.now().millisecondsSinceEpoch, // Simplification for refactor
+            'timestamp': DateTime.now().toUtc().millisecondsSinceEpoch, 
             'image_base64': base64Encode(f),
           }).toList()
-        else ...{
-          'chunk_start_timestamp': startTime?.millisecondsSinceEpoch ?? DateTime.now().millisecondsSinceEpoch,
-          'device_context': deviceContext,
-          'events': events,
-        }
+        else
+          'chunk_start_timestamp': startTime?.toUtc().millisecondsSinceEpoch ?? DateTime.now().toUtc().millisecondsSinceEpoch,
       };
 
       final compressedBody = GZipCodec().encode(utf8.encode(jsonEncode(payload)));
