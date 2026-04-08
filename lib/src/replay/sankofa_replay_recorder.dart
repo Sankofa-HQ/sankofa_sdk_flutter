@@ -115,6 +115,33 @@ class SankofaReplayRecorder {
 
   double _currentScrollY = 0;
 
+  // ── Move-event rate limiting (parity with iOS / Android / Web SDKs) ──────
+  // Flutter's [Listener] receives every PointerMove the engine produces —
+  // 60Hz on most devices, 120Hz on ProMotion iPads.  Without throttling, a
+  // single 5-second drag used to produce 300+ rows in replay_interactions,
+  // inflating "Gestures on Screen" by 100x and triggering false rage clusters.
+  //
+  // Throttle = max 1 move sample per 50ms (~20 Hz, same as the other SDKs).
+  // Coalesce = drop moves whose (x,y) is within MOVE_COALESCE_PX of the
+  //            last recorded sample.  Eliminates jitter while a finger is
+  //            held still.
+  static const Duration _moveThrottleInterval = Duration(milliseconds: 50);
+  static const double _moveCoalescePx = 4.0;
+  int _lastMoveSampleAtMs = 0;
+  double _lastMoveX = -9999;
+  double _lastMoveY = -9999;
+
+  // ── Double-tap recognition ────────────────────────────────────────────────
+  // When two pointer_down events fire within DOUBLE_TAP_INTERVAL_MS and
+  // DOUBLE_TAP_RADIUS_PX of each other, we emit an additional rrweb event
+  // with type=4 (dblclick) so the dashboard renders a "2×" marker overlay
+  // distinct from regular taps.  Mirrors the iOS / Android / Web detectors.
+  static const int _doubleTapIntervalMs = 350;
+  static const double _doubleTapRadiusPx = 25.0;
+  int _lastTapAtMs = 0;
+  double _lastTapX = -9999;
+  double _lastTapY = -9999;
+
   Future<void> _captureFrame() async {
     if (rootBoundaryKey.currentContext == null) return;
     _isCapturingFrame = true;
@@ -239,33 +266,114 @@ class SankofaReplayRecorder {
   void recordPointerEvent(String type, PointerEvent event) {
     if (!_isRecording) return;
 
-    // 🚀 Absolute Y = Screen position + Current Scroll Offset
-    final absoluteY = event.position.dy + _currentScrollY;
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    final x = event.position.dx;
+    final yScreen = event.position.dy;
+    // 🚀 Absolute Y = Screen position + Current Scroll Offset.
+    // Used as the canonical Y for ALL event types so move samples line up
+    // with the down/up rows the heatmap renders against.
+    final absoluteY = yScreen + _currentScrollY;
 
-    int rrwebType = 1;
-    if (type == 'pointer_up') {
-      rrwebType = 0;
-    } else if (type == 'pointer_move') {
-      rrwebType = 6;
-    } else if (type == 'pointer_pan_zoom') {
-      rrwebType = 7;
+    // ── (1) Down resets the move + double-tap trackers ────────────────────
+    if (type == 'pointer_down') {
+      _lastMoveSampleAtMs = 0;
+      _lastMoveX = -9999;
+      _lastMoveY = -9999;
+    }
+
+    // ── (2) Throttle + coalesce pointer_move ──────────────────────────────
+    // 60-120 Hz raw move events are reduced to ~20 Hz max, and any move
+    // within MOVE_COALESCE_PX of the previous sample is dropped entirely.
+    // Defends against flooding the dashboard heatmap with jitter samples.
+    if (type == 'pointer_move') {
+      if (nowMs - _lastMoveSampleAtMs < _moveThrottleInterval.inMilliseconds) {
+        return;
+      }
+      final dx = x - _lastMoveX;
+      final dy = yScreen - _lastMoveY;
+      if (dx * dx + dy * dy < _moveCoalescePx * _moveCoalescePx) {
+        return;
+      }
+      _lastMoveSampleAtMs = nowMs;
+      _lastMoveX = x;
+      _lastMoveY = yScreen;
+    }
+
+    int rrwebType;
+    switch (type) {
+      case 'pointer_down':
+        rrwebType = 1;
+        break;
+      case 'pointer_up':
+        rrwebType = 0;
+        break;
+      case 'pointer_move':
+        rrwebType = 6;
+        break;
+      case 'pointer_pan_zoom':
+        rrwebType = 7;
+        break;
+      default:
+        rrwebType = 1;
     }
 
     _eventBuffer.add({
       'type': 3, // rrweb IncrementalSnapshot
-      'timestamp': DateTime.now().millisecondsSinceEpoch,
+      'timestamp': nowMs,
       'data': {
         'source': 2, // MouseInteraction
         'type': rrwebType,
         'id': 1,
-        'x': event.position.dx,
-        'y': absoluteY, // Heatmap will use this!
+        'x': x,
+        'y': absoluteY,
       },
       'screen': Sankofa.instance.currentScreen, // 🔥 Stateful screen tagging
       'time_offset_ms': DateTime.now()
           .difference(_chunkStartTime!)
           .inMilliseconds,
     });
+
+    // ── (3) Double-tap recognition (parity with iOS / Android / Web) ──────
+    // Runs ONLY on pointer_down events.  When the current down lands within
+    // _doubleTapIntervalMs and _doubleTapRadiusPx of the previous one, we
+    // emit an additional rrweb event with type=4 (dblclick).  The dashboard
+    // reads this as a "2×" marker overlay distinct from regular taps.
+    // The original pointer_down stays in the buffer so the click heatmap
+    // intensity is unaffected.
+    if (type == 'pointer_down') {
+      final dt = nowMs - _lastTapAtMs;
+      final dxc = x - _lastTapX;
+      final dyc = yScreen - _lastTapY;
+      final isDouble = _lastTapAtMs > 0 &&
+          dt < _doubleTapIntervalMs &&
+          dxc * dxc + dyc * dyc < _doubleTapRadiusPx * _doubleTapRadiusPx;
+
+      if (isDouble) {
+        _eventBuffer.add({
+          'type': 3,
+          'timestamp': nowMs,
+          'data': {
+            'source': 2,
+            'type': 4, // rrweb dblclick
+            'id': 1,
+            'x': x,
+            'y': absoluteY,
+          },
+          'screen': Sankofa.instance.currentScreen,
+          'time_offset_ms': DateTime.now()
+              .difference(_chunkStartTime!)
+              .inMilliseconds,
+        });
+        // Reset so a third tap doesn't fire another double-tap.
+        _lastTapAtMs = 0;
+        _lastTapX = -9999;
+        _lastTapY = -9999;
+      } else {
+        _lastTapAtMs = nowMs;
+        _lastTapX = x;
+        _lastTapY = yScreen;
+      }
+    }
   }
 
   void recordRouteEvent(String routeName) {
