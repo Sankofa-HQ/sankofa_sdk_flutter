@@ -83,13 +83,31 @@ class Sankofa {
     _sessionManager = SankofaSessionManager(
       logger: _logger,
       onNewSession: () async {
+        // ── Unified Handshake ──
+        // One call to /api/v1/handshake returns the config for ALL
+        // Sankofa products. We extract the replay module config here.
+        // Falls back to the legacy /api/replay/config endpoint if the
+        // handshake is unavailable (older server versions).
+        final handshakeModules = await _fetchHandshake(apiKey, serverBaseUri);
+
         if (!enableSessionReplay) return;
 
-        // Remote Configuration Sync
-        _replayConfig = await _fetchReplayConfig(apiKey, serverBaseUri);
-        final config = _replayConfig ?? SankofaReplayConfig.defaults();
+        // Extract replay config from handshake or fetch legacy
+        if (handshakeModules != null && handshakeModules.containsKey('replay')) {
+          final replayData = handshakeModules['replay'] as Map<String, dynamic>?;
+          _replayConfig = replayData != null
+              ? SankofaReplayConfig.fromJson(replayData)
+              : SankofaReplayConfig.defaults();
+        } else {
+          _replayConfig = await _fetchLegacyReplayConfig(apiKey, serverBaseUri) ??
+              SankofaReplayConfig.defaults();
+        }
+        final config = _replayConfig!;
 
-        if (!config.enabled) return;
+        if (!config.enabled) {
+          _logger.log('⏸ Replay disabled by server config');
+          return;
+        }
 
         // Client-side Sampling
         final shouldRecord = Random().nextDouble() < config.sampleRate;
@@ -274,7 +292,32 @@ class Sankofa {
     await _queueManager.flush();
   }
 
-  Future<SankofaReplayConfig?> _fetchReplayConfig(
+  /// Unified handshake — fetches ALL module configs in one call.
+  /// Returns the `modules` map, or null on failure.
+  Future<Map<String, dynamic>?> _fetchHandshake(
+    String apiKey,
+    Uri baseUri,
+  ) async {
+    try {
+      final response = await http.get(
+        baseUri.replace(path: '/api/v1/handshake'),
+        headers: {'x-api-key': apiKey},
+      ).timeout(const Duration(seconds: 10));
+
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body) as Map<String, dynamic>;
+        _logger.log('🤝 Handshake OK (project: ${data['project_id']})');
+        return data['modules'] as Map<String, dynamic>?;
+      }
+      _logger.log('🤝 Handshake returned ${response.statusCode} — falling back to legacy');
+    } catch (e) {
+      _logger.log('⚠️ Handshake failed: $e — falling back to legacy');
+    }
+    return null;
+  }
+
+  /// Legacy fallback for servers without the /api/v1/handshake endpoint.
+  Future<SankofaReplayConfig?> _fetchLegacyReplayConfig(
     String apiKey,
     Uri baseUri,
   ) async {
@@ -289,7 +332,7 @@ class Sankofa {
         return SankofaReplayConfig.fromJson(data);
       }
     } catch (e) {
-      _logger.log('⚠️ Failed to fetch replay config: $e');
+      _logger.log('⚠️ Legacy replay config fetch failed: $e');
     }
     return null;
   }
