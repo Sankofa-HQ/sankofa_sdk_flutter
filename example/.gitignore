@@ -43,3 +43,18 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# ── Sankofa Deploy ─────────────────────────────────────────────
+# Sankofa Deploy — CLI credentials (never commit)
+.sankofa.json
+# Sankofa Deploy — build/ota output
+build/
+build/ota-stage/
+build/distribution/
+build/xcodebuild.log
+build/xcodebuild-archive.log
+build/xcodebuild-export.log
+build/*.ios.zip
+build/*.ota.zip
+build/*.app.zip
+# ── /Sankofa Deploy ────────────────────────────────────────────
