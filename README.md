@@ -109,28 +109,6 @@ SankofaMask(
 
 ---
 
-## 🏗 Modular Architecture (For Contributors)
-
-The Sankofa Flutter SDK is built with a modular, highly-testable architecture:
-
-- **`SankofaClient`**: The primary orchestrator handling initialization and public API dispatching.
-- **`QueueManager`**: Manages the persistent local database and background flushing logic.
-- **`IdentityManager`**: Handles anonymous ID generation and user state persistence.
-- **`SessionManager`**: Manages session rotation and inactivity timeouts.
-- **`ReplaySystem`**: A decoupled component consisting of:
-    - `Recorder`: Captures UI blueprints or screenshots.
-    - `Uploader`: Handles gzip-compressed chunk uploads.
-    - `Widgets`: Provides the `SankofaReplayBoundary` and navigation observers.
-
-### Local Development
-
-1. Clone the repo: `git clone https://github.com/saytoonz/Sankofa`
-2. Navigate to SDK: `cd sdk/sankofa_flutter`
-3. Run tests: `flutter test`
-4. Run example app: `cd example && flutter run`
-
----
-
 ## 📑 Documentation
 
 For full API references and integration guides, visit our [Documentation Portal](https://docs.sankofa.dev).
