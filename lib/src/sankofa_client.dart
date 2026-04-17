@@ -16,6 +16,7 @@ import 'sankofa_session_manager.dart';
 import 'sankofa_track.dart';
 import 'replay/sankofa_replay.dart';
 import 'replay/sankofa_replay_config.dart';
+import 'core/module_registry.dart';
 import 'utils/logger.dart';
 import 'utils/uri_helper.dart';
 
@@ -67,6 +68,10 @@ class Sankofa {
 
     _logger = SankofaLogger(debug: debug);
     _identity = SankofaIdentity(logger: _logger);
+
+    // Traffic Cop: flip core-ready so modules registered AFTER this
+    // point don't emit the "registered before init()" warning.
+    SankofaModuleRegistry.instance.markCoreInitialized();
 
     final v1BaseUri = UriHelper.resolveV1BaseUri(endpoint);
     final trackUri = UriHelper.resolveTrackUri(endpoint);
@@ -294,20 +299,40 @@ class Sankofa {
 
   /// Unified handshake — fetches ALL module configs in one call.
   /// Returns the `modules` map, or null on failure.
+  ///
+  /// Reverse Handshake: appends `installed=analytics,deploy,...` so the
+  /// server knows what this app binary can actually run. The dashboard
+  /// uses this to gate UI toggles for modules the SDK doesn't have.
+  /// Legacy SDKs (no `installed` param) default to "allow everything"
+  /// server-side so we stay backward compatible.
   Future<Map<String, dynamic>?> _fetchHandshake(
     String apiKey,
     Uri baseUri,
   ) async {
     try {
+      final installed = SankofaModuleRegistry.instance.getInstalledModules().join(',');
+      final uri = baseUri.replace(
+        path: '/api/v1/handshake',
+        queryParameters: {
+          'installed': installed,
+          'sdk': 'flutter',
+        },
+      );
       final response = await http.get(
-        baseUri.replace(path: '/api/v1/handshake'),
+        uri,
         headers: {'x-api-key': apiKey},
       ).timeout(const Duration(seconds: 10));
 
       if (response.statusCode == 200) {
         final data = json.decode(response.body) as Map<String, dynamic>;
-        _logger.log('🤝 Handshake OK (project: ${data['project_id']})');
-        return data['modules'] as Map<String, dynamic>?;
+        _logger.log('🤝 Handshake OK (project: ${data['project_id']}, installed: $installed)');
+        final modules = data['modules'] as Map<String, dynamic>?;
+
+        // Traffic Cop — route each enabled module flag to its registered
+        // handler. Flags for missing modules warn (debug) or no-op (release).
+        await SankofaModuleRegistry.instance.routeHandshake(modules);
+
+        return modules;
       }
       _logger.log('🤝 Handshake returned ${response.statusCode} — falling back to legacy');
     } catch (e) {
