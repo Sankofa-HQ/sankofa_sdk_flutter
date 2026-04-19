@@ -23,7 +23,11 @@ import 'package:flutter/foundation.dart';
 /// "SDK Not Detected" states for modules the app binary lacks.
 
 /// Canonical module names Sankofa ships.
-enum SankofaModuleName { analytics, deploy, catchModule }
+///
+/// The `-Module` suffix on `catchModule`, `switchModule`, `configModule`
+/// avoids clashes with Dart keywords (`catch`, `switch`) and common
+/// stdlib names. The wire name (what the server speaks) stays clean.
+enum SankofaModuleName { analytics, deploy, catchModule, switchModule, configModule }
 
 extension SankofaModuleNameExt on SankofaModuleName {
   String get wireName {
@@ -34,6 +38,10 @@ extension SankofaModuleNameExt on SankofaModuleName {
         return 'deploy';
       case SankofaModuleName.catchModule:
         return 'catch';
+      case SankofaModuleName.switchModule:
+        return 'switch';
+      case SankofaModuleName.configModule:
+        return 'config';
     }
   }
 }
@@ -126,6 +134,36 @@ class SankofaModuleRegistry {
         debugPrint(
           '[Sankofa] Server enabled "catch" but SankofaCatch is not '
           'installed. Add the Catch SDK to enable crash reporting.',
+        );
+      }
+    }
+
+    // Switch — feature flags
+    final switchCfg = modules['switch'] as Map<String, dynamic>?;
+    if (switchCfg != null && switchCfg['enabled'] == true) {
+      final mod = _registered[SankofaModuleName.switchModule];
+      if (mod != null) {
+        await mod.applyHandshake(switchCfg);
+      } else if (kDebugMode) {
+        debugPrint(
+          '[Sankofa] Server enabled "switch" but SankofaSwitch is not '
+          'installed. Import sankofa_flutter and instantiate '
+          'SankofaSwitch() after Sankofa.instance.init().',
+        );
+      }
+    }
+
+    // Config — remote config
+    final configCfg = modules['config'] as Map<String, dynamic>?;
+    if (configCfg != null && configCfg['enabled'] == true) {
+      final mod = _registered[SankofaModuleName.configModule];
+      if (mod != null) {
+        await mod.applyHandshake(configCfg);
+      } else if (kDebugMode) {
+        debugPrint(
+          '[Sankofa] Server enabled "config" but SankofaConfig is not '
+          'installed. Import sankofa_flutter and instantiate '
+          'SankofaConfig() after Sankofa.instance.init().',
         );
       }
     }

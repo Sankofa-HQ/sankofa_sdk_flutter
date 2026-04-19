@@ -305,12 +305,25 @@ class Sankofa {
   /// uses this to gate UI toggles for modules the SDK doesn't have.
   /// Legacy SDKs (no `installed` param) default to "allow everything"
   /// server-side so we stay backward compatible.
+  /// Cached modules map from the last successful handshake. Used when
+  /// the server returns 304 so the Traffic Cop still gets its routing
+  /// pass — late-registered modules (constructed between handshakes)
+  /// still pick up the payload they missed.
+  Map<String, dynamic>? _cachedHandshakeModules;
+
+  /// Composite ETag from the last successful handshake. Sent as
+  /// If-None-Match on the next refresh. Server computes this by
+  /// hashing every module's per-module etag (see
+  /// server/engine/ee/deploy/handshake.go#computeCompositeEtag).
+  String _handshakeEtag = '';
+
   Future<Map<String, dynamic>?> _fetchHandshake(
     String apiKey,
     Uri baseUri,
   ) async {
     try {
-      final installed = SankofaModuleRegistry.instance.getInstalledModules().join(',');
+      final installed =
+          SankofaModuleRegistry.instance.getInstalledModules().join(',');
       final uri = baseUri.replace(
         path: '/api/v1/handshake',
         queryParameters: {
@@ -318,15 +331,33 @@ class Sankofa {
           'sdk': 'flutter',
         },
       );
-      final response = await http.get(
-        uri,
-        headers: {'x-api-key': apiKey},
-      ).timeout(const Duration(seconds: 10));
+      final headers = <String, String>{'x-api-key': apiKey};
+      if (_handshakeEtag.isNotEmpty) {
+        headers['If-None-Match'] = _handshakeEtag;
+      }
+      final response = await http
+          .get(uri, headers: headers)
+          .timeout(const Duration(seconds: 10));
+
+      // 304 — cache still current. Re-fire Traffic Cop so modules
+      // registered between the last handshake and now pick up the
+      // payload they missed (common during hot reload in dev).
+      if (response.statusCode == 304 && _cachedHandshakeModules != null) {
+        _logger.log('🤝 Handshake 304 — cached modules still current');
+        await SankofaModuleRegistry.instance
+            .routeHandshake(_cachedHandshakeModules);
+        return _cachedHandshakeModules;
+      }
 
       if (response.statusCode == 200) {
         final data = json.decode(response.body) as Map<String, dynamic>;
-        _logger.log('🤝 Handshake OK (project: ${data['project_id']}, installed: $installed)');
+        _logger.log(
+            '🤝 Handshake OK (project: ${data['project_id']}, installed: $installed)');
         final modules = data['modules'] as Map<String, dynamic>?;
+        _cachedHandshakeModules = modules;
+        final etag =
+            response.headers['etag'] ?? response.headers['ETag'] ?? '';
+        _handshakeEtag = etag;
 
         // Traffic Cop — route each enabled module flag to its registered
         // handler. Flags for missing modules warn (debug) or no-op (release).
@@ -334,7 +365,8 @@ class Sankofa {
 
         return modules;
       }
-      _logger.log('🤝 Handshake returned ${response.statusCode} — falling back to legacy');
+      _logger.log(
+          '🤝 Handshake returned ${response.statusCode} — falling back to legacy');
     } catch (e) {
       _logger.log('⚠️ Handshake failed: $e — falling back to legacy');
     }
