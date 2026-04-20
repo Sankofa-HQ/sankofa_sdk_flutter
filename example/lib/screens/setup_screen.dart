@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:sankofa_flutter/sankofa_flutter.dart';
+import '../sankofa_runtime.dart';
 import 'event_tester_screen.dart';
 
 class SetupScreen extends StatefulWidget {
@@ -71,6 +72,16 @@ class _SetupScreenState extends State<SetupScreen>
 
     setState(() => _connecting = true);
     try {
+      // Construct the Switch + Config singletons BEFORE init so they
+      // register with the Traffic Cop before the first handshake
+      // fires. Constructing after init means the first handshake runs
+      // with empty registry and logs "module not installed" warnings —
+      // subsequent handshakes would pick them up, but the initial
+      // payload is lost and the Lab renders bundled defaults for a
+      // few seconds until the next refresh.
+      sankofaSwitch();
+      sankofaConfig();
+
       await Sankofa.instance.init(
         apiKey: key,
         endpoint: url,

@@ -1,7 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:sankofa_flutter/sankofa_flutter.dart';
+import '../sankofa_demo.dart';
+import '../sankofa_runtime.dart';
 import 'animation_stress_test_screen.dart';
 import 'dashboard_screen.dart';
+import 'flags_lab_screen.dart';
 import 'settings_screen.dart';
 import 'profile_screen.dart';
 
@@ -63,6 +66,13 @@ class _EventTesterScreenState extends State<EventTesterScreen> {
             ).push(MaterialPageRoute(builder: (_) => const DashboardScreen())),
           ),
           IconButton(
+            icon: const Icon(Icons.science_rounded),
+            tooltip: 'Flags & Config Lab',
+            onPressed: () => Navigator.of(
+              context,
+            ).push(MaterialPageRoute(builder: (_) => const FlagsLabScreen())),
+          ),
+          IconButton(
             icon: const Icon(Icons.settings_rounded),
             onPressed: () => Navigator.of(
               context,
@@ -74,6 +84,8 @@ class _EventTesterScreenState extends State<EventTesterScreen> {
         padding: const EdgeInsets.all(20),
         child: Column(
           children: [
+            _buildMaintenanceBanner(),
+            _buildFlagDrivenCta(),
             _buildSectionHeader(
               Icons.send_rounded,
               'Custom Event',
@@ -98,6 +110,83 @@ class _EventTesterScreenState extends State<EventTesterScreen> {
           Sankofa.instance.track('increment_counter', {'count': _counter});
         },
         child: const Icon(Icons.add),
+      ),
+    );
+  }
+
+  // Maintenance banner — visibility driven by the
+  // `maintenance_banner_enabled` remote config. Offline cache or
+  // bundled default keeps this hidden until an operator flips it.
+  Widget _buildMaintenanceBanner() {
+    final on = sankofaConfig().get<bool>(
+      DemoConfig.maintenanceBannerEnabled,
+      false,
+    );
+    if (!on) return const SizedBox.shrink();
+    return Container(
+      margin: const EdgeInsets.only(bottom: 16),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF59E0B).withValues(alpha: 0.15),
+        border: Border.all(color: const Color(0xFFF59E0B)),
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: const Text(
+        '⚠️  Maintenance window — see the Flags Lab for details.',
+        style: TextStyle(color: Color(0xFFFBBF24), fontWeight: FontWeight.w600),
+      ),
+    );
+  }
+
+  // Variant-driven CTA — label and colour flip with
+  // `checkout_cta_variant` (control / blue / red). Pressing it reads
+  // the variant, which records a flag exposure on the server.
+  Widget _buildFlagDrivenCta() {
+    final variant = sankofaSwitch().getVariant(
+      DemoFlags.checkoutCtaVariant,
+      defaultValue: 'control',
+    );
+    final label = variant == 'blue'
+        ? 'Try it free'
+        : variant == 'red'
+            ? 'Upgrade now'
+            : 'Fire showcase event';
+    final bg = variant == 'blue'
+        ? const Color(0xFF2563EB)
+        : variant == 'red'
+            ? const Color(0xFFDC2626)
+            : const Color(0xFF6C5CE7);
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 20),
+      child: SizedBox(
+        width: double.infinity,
+        child: FilledButton(
+          style: FilledButton.styleFrom(
+            backgroundColor: bg,
+            foregroundColor: Colors.white,
+            padding: const EdgeInsets.symmetric(vertical: 14),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12),
+            ),
+          ),
+          onPressed: () {
+            Sankofa.instance.track('cta_showcase_pressed', {'variant': variant});
+          },
+          child: Column(
+            children: [
+              Text(label, style: const TextStyle(fontWeight: FontWeight.bold)),
+              const SizedBox(height: 2),
+              Text(
+                'variant · $variant',
+                style: TextStyle(
+                  fontSize: 10,
+                  letterSpacing: 1,
+                  color: Colors.white.withValues(alpha: 0.8),
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
