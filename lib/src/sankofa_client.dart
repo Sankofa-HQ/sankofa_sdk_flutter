@@ -1,7 +1,10 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io' show Platform;
 import 'dart:math';
+import 'dart:ui' as ui;
 import 'package:http/http.dart' as http;
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'sankofa_constants.dart';
@@ -324,12 +327,52 @@ class Sankofa {
     try {
       final installed =
           SankofaModuleRegistry.instance.getInstalledModules().join(',');
+
+      // Device context — the server's evaluator needs distinct_id to
+      // bucket rollouts deterministically, resolve cohort membership,
+      // and honor user allow-lists. platform + os_version + app_version
+      // feed the version-range targeting engine. Missing fields
+      // gracefully no-op server-side; we send what we have.
+      final query = <String, String>{
+        'installed': installed,
+        'sdk': 'flutter',
+      };
+      final did = _identity.distinctId;
+      if (did.isNotEmpty) {
+        query['distinct_id'] = did;
+      }
+      // Platform is sync + always available. Use the "ios" / "android"
+      // normalised form the server expects.
+      if (Platform.isIOS) {
+        query['platform'] = 'ios';
+      } else if (Platform.isAndroid) {
+        query['platform'] = 'android';
+      } else {
+        query['platform'] = Platform.operatingSystem;
+      }
+      // App version from package_info — the marketing version the
+      // server's semver range compares against. PackageInfo caches
+      // internally so calling it every handshake is cheap.
+      try {
+        final info = await PackageInfo.fromPlatform();
+        if (info.version.isNotEmpty) {
+          query['app_version'] = info.version;
+        }
+      } catch (_) {
+        // Non-fatal — targeting on version just won't apply.
+      }
+      // Locale from the PlatformDispatcher — always sync.
+      try {
+        final locale = ui.PlatformDispatcher.instance.locale;
+        final tag = locale.toLanguageTag();
+        if (tag.isNotEmpty) query['locale'] = tag;
+      } catch (_) {
+        // Non-fatal.
+      }
+
       final uri = baseUri.replace(
         path: '/api/v1/handshake',
-        queryParameters: {
-          'installed': installed,
-          'sdk': 'flutter',
-        },
+        queryParameters: query,
       );
       final headers = <String, String>{'x-api-key': apiKey};
       if (_handshakeEtag.isNotEmpty) {
