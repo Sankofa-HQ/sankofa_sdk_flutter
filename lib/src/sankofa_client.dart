@@ -341,6 +341,14 @@ class Sankofa {
       if (did.isNotEmpty) {
         query['distinct_id'] = did;
       }
+      // Identity stitching — forward the pre-identify anon id when
+      // identify() has fired (post-identify distinctId diverges from
+      // anonymousId). The server uses it to fold pre/post login
+      // evaluations and exposures into a single experiment subject.
+      final anonId = _identity.anonymousId;
+      if (anonId != null && anonId.isNotEmpty && anonId != did) {
+        query['anon_id'] = anonId;
+      }
       // Platform is sync + always available. Use the "ios" / "android"
       // normalised form the server expects.
       if (Platform.isIOS) {
