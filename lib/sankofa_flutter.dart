@@ -23,3 +23,20 @@ export 'src/switch/flag_decision.dart'
 export 'src/config/sankofa_config.dart' show SankofaConfig;
 export 'src/config/item_decision.dart'
     show ItemDecision, ItemReason, ConfigType, ConfigChangeListener;
+
+// Sankofa Catch — error tracking + crash reporting
+export 'src/catch/sankofa_catch.dart' show SankofaCatch;
+export 'src/catch/catch_types.dart'
+    show
+        CatchEvent,
+        CatchBreadcrumb,
+        CatchCaptureOptions,
+        CatchDebugImage,
+        CatchDebugMeta,
+        CatchDeviceContext,
+        CatchException,
+        CatchLevel,
+        CatchMechanism,
+        CatchStackFrame,
+        CatchStackTrace,
+        CatchUserContext;

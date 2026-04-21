@@ -46,8 +46,31 @@ class Sankofa {
   bool _isInitialized = false;
   Timer? _flushTimer;
 
+  // Cached copies of the init-time credentials so modules constructed
+  // after init() (Catch, Switch, Config) can resolve their own
+  // endpoints without being passed the config twice.
+  String? _apiKey;
+  String? _endpoint;
+
   /// Returns true if the SDK has been initialized.
   bool get isInitialized => _isInitialized;
+
+  /// The API key passed to init(). Null when init() hasn't completed.
+  /// Exposed so sibling modules (Catch, Switch, Config) can authenticate
+  /// their own API calls without the host app plumbing credentials twice.
+  String? get apiKey => _apiKey;
+
+  /// The server endpoint passed to init(). Null when init() hasn't completed.
+  String? get endpoint => _endpoint;
+
+  /// Current identity — distinct_id + anonymous_id state. Modules that
+  /// need to attach user identity to their own events (e.g. Catch) read
+  /// from this rather than duplicating the identity machinery.
+  SankofaIdentity? get identity => _isInitialized ? _identity : null;
+
+  /// Current session manager — modules needing session_id (Catch for
+  /// replay linking) read from here.
+  SankofaSessionManager? get sessionManager => _isInitialized ? _sessionManager : null;
 
   /// Initializes the Sankofa SDK with your [apiKey].
   ///
@@ -69,6 +92,8 @@ class Sankofa {
   }) async {
     if (_isInitialized) await dispose();
 
+    _apiKey = apiKey;
+    _endpoint = endpoint;
     _logger = SankofaLogger(debug: debug);
     _identity = SankofaIdentity(logger: _logger);
 
