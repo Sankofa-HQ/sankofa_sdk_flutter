@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io' show Platform;
+import 'dart:isolate';
 import 'dart:math' show Random;
 import 'dart:ui';
 
@@ -221,6 +222,48 @@ class SankofaCatch implements SankofaModule {
         // according to the host's own policy.
         return _previousPlatformOnError?.call(error, stackTrace) ?? true;
       };
+
+      // ── Isolate error listener ─────────────────────────────────
+      //
+      // FlutterError.onError + PlatformDispatcher only capture
+      // errors inside the root isolate's zone. Errors raised inside
+      // compute() / spawn()'d isolates escape both handlers and
+      // silently crash that isolate while the app keeps running.
+      //
+      // Isolate.current.addErrorListener fixes this — it receives
+      // every (error, stackTrace) pair from the isolate it's
+      // registered on. Chaining isn't needed here because
+      // addErrorListener appends rather than replacing.
+      try {
+        final receivePort = ReceivePort();
+        receivePort.listen((dynamic message) {
+          // Isolate sends error messages as a 2-element list:
+          // [errorString, stackTraceString].
+          if (message is List && message.length == 2) {
+            final errorText = message[0]?.toString() ?? 'isolate error';
+            final stackText = message[1]?.toString();
+            final stack = stackText == null ? null : StackTrace.fromString(stackText);
+            try {
+              _capture(
+                error: errorText,
+                stackTrace: stack,
+                message: null,
+                type: 'unhandled_rejection',
+                options: null,
+                mechanism: const CatchMechanism(
+                  type: 'isolate_error',
+                  handled: false,
+                  description: 'error escaped an isolate zone',
+                ),
+              );
+            } catch (_) { /* never throw from handler */ }
+          }
+        });
+        Isolate.current.addErrorListener(receivePort.sendPort);
+      } catch (_) {
+        // Some Flutter Web builds don't support Isolate APIs; swallow
+        // so the plugin still initialises on every platform.
+      }
     }
   }
 
