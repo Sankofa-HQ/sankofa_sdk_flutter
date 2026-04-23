@@ -3,6 +3,7 @@ import 'package:sankofa_flutter/sankofa_flutter.dart';
 import '../sankofa_demo.dart';
 import '../sankofa_runtime.dart';
 import 'animation_stress_test_screen.dart';
+import 'crash_gallery_screen.dart';
 import 'dashboard_screen.dart';
 import 'flags_lab_screen.dart';
 import 'settings_screen.dart';
@@ -258,6 +259,12 @@ class _EventTesterScreenState extends State<EventTesterScreen> {
           icon: Icons.speed_rounded,
           color: Colors.red,
           screen: const AnimationStressTestScreen(),
+        ),
+        _NavCard(
+          label: 'Catch gallery',
+          icon: Icons.bug_report_rounded,
+          color: Colors.pink,
+          screen: const CrashGalleryScreen(),
         ),
       ],
     );

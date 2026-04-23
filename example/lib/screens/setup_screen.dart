@@ -81,6 +81,10 @@ class _SetupScreenState extends State<SetupScreen>
       // few seconds until the next refresh.
       sankofaSwitch();
       sankofaConfig();
+      // Catch must be instantiated BEFORE init() too so the Traffic
+      // Cop knows to route the catch handshake payload to it —
+      // matches how Switch + Config register themselves above.
+      sankofaCatch();
 
       await Sankofa.instance.init(
         apiKey: key,
