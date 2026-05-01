@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 
 import 'branching.dart';
 import 'pulse_models.dart';
+import 'translator.dart';
 
 /// Pure-Flutter survey renderer. Wraps every supported question kind
 /// in Material widgets — Theme.of(context) drives the look so the
@@ -18,6 +19,10 @@ import 'pulse_models.dart';
 class SankofaSurveyDialog extends StatefulWidget {
   final PulseSurvey survey;
   final List<PulseBranchingRule> branchingRules;
+  final PulseTranslator? translator;
+  final Map<String, Object?> initialAnswers;
+  final String? initialQuestionId;
+  final void Function(Map<String, Object?> answers, String currentQuestionId)? onProgress;
   final void Function(PulseSubmitPayload payload) onSubmit;
   final VoidCallback onDismiss;
 
@@ -25,6 +30,10 @@ class SankofaSurveyDialog extends StatefulWidget {
     super.key,
     required this.survey,
     this.branchingRules = const [],
+    this.translator,
+    this.initialAnswers = const {},
+    this.initialQuestionId,
+    this.onProgress,
     required this.onSubmit,
     required this.onDismiss,
   });
@@ -35,7 +44,7 @@ class SankofaSurveyDialog extends StatefulWidget {
 
 class _SankofaSurveyDialogState extends State<SankofaSurveyDialog> {
   late final List<PulseQuestion> _questions;
-  final Map<String, Object?> _answers = {};
+  late final Map<String, Object?> _answers;
   int _index = 0;
   String? _error;
 
@@ -49,6 +58,12 @@ class _SankofaSurveyDialogState extends State<SankofaSurveyDialog> {
     super.initState();
     _questions = [...widget.survey.questions]
       ..sort((a, b) => a.orderIndex.compareTo(b.orderIndex));
+    _answers = Map<String, Object?>.from(widget.initialAnswers);
+    final initialId = widget.initialQuestionId;
+    if (initialId != null) {
+      final target = _questions.indexWhere((q) => q.id == initialId);
+      if (target >= 0) _index = target;
+    }
   }
 
   PulseQuestion? get _current =>
@@ -99,6 +114,7 @@ class _SankofaSurveyDialogState extends State<SankofaSurveyDialog> {
           _index = target;
           _error = null;
         });
+        _emitProgress();
         return;
       }
       // Target id not found in this survey — fall through rather
@@ -114,6 +130,19 @@ class _SankofaSurveyDialogState extends State<SankofaSurveyDialog> {
         _index += 1;
         _error = null;
       });
+      _emitProgress();
+    }
+  }
+
+  void _emitProgress() {
+    final cb = widget.onProgress;
+    if (cb == null) return;
+    final q = _current;
+    if (q == null) return;
+    try {
+      cb(Map<String, Object?>.from(_answers), q.id);
+    } catch (_) {
+      // Host callback errors must never break navigation.
     }
   }
 
@@ -129,17 +158,37 @@ class _SankofaSurveyDialogState extends State<SankofaSurveyDialog> {
     );
   }
 
-  Color _accent(BuildContext context) {
-    final theme = widget.survey.theme;
-    final primary = theme?.primaryColor;
-    if (primary != null && primary.isNotEmpty) {
-      final parsed = _parseHex(primary);
-      if (parsed != null) return parsed;
+  // ── Theme resolution ───────────────────────────────────────────
+  //
+  // We honour the seven theme fields on PulseTheme:
+  //   primary_color    → accent (buttons, highlights, ratings)
+  //   background_color → dialog window background
+  //   foreground_color → primary text (title, prompt, answer text)
+  //   muted_color      → secondary text (description, helptext)
+  //   border_color     → input field outlines
+  //   font_family      → TextStyle.fontFamily for every text view
+  //   dark_mode        → "auto" / "light" / "dark" — flips the
+  //                      built-in palette when the operator's
+  //                      explicit colors aren't set; respects
+  //                      the system setting on "auto"
+  //
+  // Each resolver falls back to a sensible default if the wire value
+  // is missing or unparseable, so a theme that ships with only
+  // `primary_color` set still renders cleanly.
+
+  bool _isDarkPalette(BuildContext context) {
+    switch (widget.survey.theme?.darkMode?.toLowerCase()) {
+      case 'dark':
+        return true;
+      case 'light':
+        return false;
+      default:
+        return Theme.of(context).brightness == Brightness.dark;
     }
-    return Theme.of(context).colorScheme.primary;
   }
 
-  Color? _parseHex(String hex) {
+  Color? _parseHex(String? hex) {
+    if (hex == null || hex.isEmpty) return null;
     final cleaned = hex.replaceAll('#', '').trim();
     if (cleaned.length == 6) {
       final v = int.tryParse('FF$cleaned', radix: 16);
@@ -151,16 +200,68 @@ class _SankofaSurveyDialogState extends State<SankofaSurveyDialog> {
     return null;
   }
 
+  Color _accent(BuildContext context) {
+    return _parseHex(widget.survey.theme?.primaryColor) ??
+        (_isDarkPalette(context)
+            ? const Color(0xFFFB7185)
+            : const Color(0xFFF43F5E));
+  }
+
+  Color _background(BuildContext context) {
+    return _parseHex(widget.survey.theme?.backgroundColor) ??
+        (_isDarkPalette(context)
+            ? const Color(0xFF0A0A0A)
+            : const Color(0xFFFFFFFF));
+  }
+
+  Color _foreground(BuildContext context) {
+    return _parseHex(widget.survey.theme?.foregroundColor) ??
+        (_isDarkPalette(context)
+            ? const Color(0xFFFAFAFA)
+            : const Color(0xFF18181B));
+  }
+
+  Color _muted(BuildContext context) {
+    return _parseHex(widget.survey.theme?.mutedColor) ??
+        (_isDarkPalette(context)
+            ? const Color(0xFFA1A1AA)
+            : const Color(0xFF71717A));
+  }
+
+  Color _border(BuildContext context) {
+    return _parseHex(widget.survey.theme?.borderColor) ??
+        (_isDarkPalette(context)
+            ? const Color(0xFF27272A)
+            : const Color(0xFFE4E4E7));
+  }
+
+  String? _fontFamily() {
+    final f = widget.survey.theme?.fontFamily;
+    return (f == null || f.isEmpty) ? null : f;
+  }
+
   @override
   Widget build(BuildContext context) {
     final q = _current;
     final isLast = _index == _questions.length - 1;
     final accent = _accent(context);
+    final bg = _background(context);
+    final fg = _foreground(context);
+    final muted = _muted(context);
+    // Error red is intentionally NOT theme-resolved — it must always
+    // be unmistakable as an error, not blend with the brand.
+    final errorColor = _isDarkPalette(context)
+        ? const Color(0xFFFCA5A5)
+        : const Color(0xFFDC2626);
+    final fontFamily = _fontFamily();
+    final border = _border(context);
     final progress = _questions.isEmpty
         ? 1.0
         : (_index + 1) / _questions.length;
 
-    return Dialog(
+    final isRtl = pulseLocaleIsRTL(widget.translator?.locale);
+    final dialog = Dialog(
+      backgroundColor: bg,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
       insetPadding: const EdgeInsets.symmetric(horizontal: 24, vertical: 32),
       child: ConstrainedBox(
@@ -171,7 +272,7 @@ class _SankofaSurveyDialogState extends State<SankofaSurveyDialog> {
             crossAxisAlignment: CrossAxisAlignment.start,
             mainAxisSize: MainAxisSize.min,
             children: [
-              _header(context),
+              _header(context, fg: fg, muted: muted, fontFamily: fontFamily),
               const SizedBox(height: 12),
               ClipRRect(
                 borderRadius: BorderRadius.circular(8),
@@ -189,16 +290,32 @@ class _SankofaSurveyDialogState extends State<SankofaSurveyDialog> {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
-                          q.prompt,
-                          style: Theme.of(context).textTheme.titleSmall,
-                        ),
-                        if (q.helptext != null && q.helptext!.isNotEmpty) ...[
-                          const SizedBox(height: 4),
-                          Text(
-                            q.helptext!,
-                            style: Theme.of(context).textTheme.bodySmall,
+                          widget.translator?.questionPrompt(q) ?? q.prompt,
+                          style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                            color: fg,
+                            fontFamily: fontFamily,
                           ),
-                        ],
+                        ),
+                        () {
+                          final help =
+                              widget.translator?.questionHelptext(q) ?? q.helptext;
+                          if (help == null || help.isEmpty) {
+                            return const SizedBox.shrink();
+                          }
+                          return Padding(
+                            padding: const EdgeInsets.only(top: 4),
+                            child: Text(
+                              help,
+                              style: Theme.of(context)
+                                  .textTheme
+                                  .bodySmall
+                                  ?.copyWith(
+                                    color: muted,
+                                    fontFamily: fontFamily,
+                                  ),
+                            ),
+                          );
+                        }(),
                         const SizedBox(height: 12),
                         _renderInput(context, q, accent),
                       ],
@@ -210,7 +327,7 @@ class _SankofaSurveyDialogState extends State<SankofaSurveyDialog> {
                 const SizedBox(height: 8),
                 Text(
                   _error!,
-                  style: TextStyle(color: Theme.of(context).colorScheme.error),
+                  style: TextStyle(color: errorColor, fontFamily: fontFamily),
                 ),
               ],
               const SizedBox(height: 16),
@@ -218,6 +335,11 @@ class _SankofaSurveyDialogState extends State<SankofaSurveyDialog> {
                 children: [
                   Expanded(
                     child: OutlinedButton(
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: fg,
+                        side: BorderSide(color: border),
+                        textStyle: TextStyle(fontFamily: fontFamily),
+                      ),
                       onPressed: _history.isNotEmpty ? _goBack : null,
                       child: const Text('Back'),
                     ),
@@ -225,7 +347,10 @@ class _SankofaSurveyDialogState extends State<SankofaSurveyDialog> {
                   const SizedBox(width: 12),
                   Expanded(
                     child: FilledButton(
-                      style: FilledButton.styleFrom(backgroundColor: accent),
+                      style: FilledButton.styleFrom(
+                        backgroundColor: accent,
+                        textStyle: TextStyle(fontFamily: fontFamily),
+                      ),
                       onPressed: _goForward,
                       child: Text(isLast ? 'Submit' : 'Next'),
                     ),
@@ -237,35 +362,79 @@ class _SankofaSurveyDialogState extends State<SankofaSurveyDialog> {
         ),
       ),
     );
+    // When the survey's resolved translation locale is RTL, force
+    // the entire dialog tree into a right-to-left reading order
+    // even if the host's MaterialApp/Locale is LTR. This mirrors
+    // the Web SDK's `dir="rtl"` attribute on the rendered survey
+    // root.
+    if (isRtl) {
+      return Directionality(textDirection: TextDirection.rtl, child: dialog);
+    }
+    return dialog;
   }
 
-  Widget _header(BuildContext context) {
+  Widget _header(
+    BuildContext context, {
+    required Color fg,
+    required Color muted,
+    String? fontFamily,
+  }) {
+    final logoUrl = widget.survey.theme?.logoUrl;
+    final showLogo = logoUrl != null && logoUrl.isNotEmpty;
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
+        if (showLogo) ...[
+          // 24×24 logo block alongside the survey title. We deliberately
+          // avoid networking timeouts on the dialog's first paint —
+          // Image.network with errorBuilder shows nothing if the URL
+          // is unreachable rather than throwing a default broken-image
+          // glyph that would clash with the operator's brand.
+          ClipRRect(
+            borderRadius: BorderRadius.circular(4),
+            child: Image.network(
+              logoUrl,
+              width: 24,
+              height: 24,
+              fit: BoxFit.contain,
+              errorBuilder: (_, __, ___) => const SizedBox(width: 24, height: 24),
+            ),
+          ),
+          const SizedBox(width: 8),
+        ],
         Expanded(
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(
-                widget.survey.name,
-                style: Theme.of(context).textTheme.titleMedium,
+                widget.translator?.surveyName(widget.survey) ?? widget.survey.name,
+                style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                  color: fg,
+                  fontFamily: fontFamily,
+                ),
                 maxLines: 2,
                 overflow: TextOverflow.ellipsis,
               ),
-              if (widget.survey.description != null &&
-                  widget.survey.description!.isNotEmpty) ...[
-                const SizedBox(height: 2),
-                Text(
-                  widget.survey.description!,
-                  style: Theme.of(context).textTheme.bodySmall,
-                ),
-              ],
+              () {
+                final desc = widget.translator?.surveyDescription(widget.survey)
+                    ?? widget.survey.description;
+                if (desc == null || desc.isEmpty) return const SizedBox.shrink();
+                return Padding(
+                  padding: const EdgeInsets.only(top: 2),
+                  child: Text(
+                    desc,
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: muted,
+                      fontFamily: fontFamily,
+                    ),
+                  ),
+                );
+              }(),
             ],
           ),
         ),
         IconButton(
-          icon: const Icon(Icons.close, size: 20),
+          icon: Icon(Icons.close, size: 20, color: muted),
           tooltip: 'Dismiss',
           onPressed: () {
             widget.onDismiss();
@@ -323,22 +492,42 @@ class _SankofaSurveyDialogState extends State<SankofaSurveyDialog> {
     }
   }
 
+  InputDecoration _themedInput(BuildContext context) {
+    final border = _border(context);
+    return InputDecoration(
+      border: OutlineInputBorder(
+        borderSide: BorderSide(color: border),
+      ),
+      enabledBorder: OutlineInputBorder(
+        borderSide: BorderSide(color: border),
+      ),
+      focusedBorder: OutlineInputBorder(
+        borderSide: BorderSide(color: _accent(context), width: 2),
+      ),
+    );
+  }
+
+  TextStyle _themedInputStyle(BuildContext context) =>
+      TextStyle(color: _foreground(context), fontFamily: _fontFamily());
+
   Widget _renderTextField(PulseQuestion q, {required bool multiline}) {
     return TextFormField(
       initialValue: _answers[q.id] as String?,
       maxLines: multiline ? 4 : 1,
+      style: _themedInputStyle(context),
       keyboardType:
           multiline ? TextInputType.multiline : TextInputType.text,
       onChanged: (v) {
         _answers[q.id] = v.trim().isEmpty ? null : v;
       },
-      decoration: const InputDecoration(border: OutlineInputBorder()),
+      decoration: _themedInput(context),
     );
   }
 
   Widget _renderNumber(PulseQuestion q) {
     return TextFormField(
       initialValue: (_answers[q.id] as num?)?.toString(),
+      style: _themedInputStyle(context),
       keyboardType: const TextInputType.numberWithOptions(decimal: true),
       inputFormatters: [
         FilteringTextInputFormatter.allow(RegExp(r'^\-?\d*\.?\d*$')),
@@ -346,7 +535,7 @@ class _SankofaSurveyDialogState extends State<SankofaSurveyDialog> {
       onChanged: (v) {
         _answers[q.id] = double.tryParse(v);
       },
-      decoration: const InputDecoration(border: OutlineInputBorder()),
+      decoration: _themedInput(context),
     );
   }
 
@@ -422,7 +611,7 @@ class _SankofaSurveyDialogState extends State<SankofaSurveyDialog> {
           for (final opt in options)
             RadioListTile<String>(
               value: opt.key,
-              title: Text(opt.label),
+              title: Text(widget.translator?.optionLabel(q, opt) ?? opt.label),
               activeColor: accent,
               contentPadding: EdgeInsets.zero,
             ),
@@ -440,7 +629,7 @@ class _SankofaSurveyDialogState extends State<SankofaSurveyDialog> {
         for (final opt in options)
           CheckboxListTile(
             value: current.contains(opt.key),
-            title: Text(opt.label),
+            title: Text(widget.translator?.optionLabel(q, opt) ?? opt.label),
             activeColor: accent,
             contentPadding: EdgeInsets.zero,
             onChanged: (checked) {
@@ -533,7 +722,9 @@ class _SankofaSurveyDialogState extends State<SankofaSurveyDialog> {
     final current = _answers[q.id] as bool? ?? false;
     return CheckboxListTile(
       value: current,
-      title: Text(q.helptext ?? 'I agree'),
+      title: Text(
+        widget.translator?.questionHelptext(q) ?? q.helptext ?? 'I agree',
+      ),
       contentPadding: EdgeInsets.zero,
       onChanged: (v) => setState(() => _answers[q.id] = v ?? false),
     );
@@ -634,7 +825,7 @@ class _SankofaSurveyDialogState extends State<SankofaSurveyDialog> {
         for (final opt in options)
           Row(
             children: [
-              Expanded(child: Text(opt.label)),
+              Expanded(child: Text(widget.translator?.optionLabel(q, opt) ?? opt.label)),
               ChoiceChip(
                 label: const Text('Best'),
                 selected: current['best'] == opt.key,

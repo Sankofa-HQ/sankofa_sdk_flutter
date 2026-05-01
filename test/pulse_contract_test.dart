@@ -44,6 +44,70 @@ void main() {
           jsonDecode(jsonEncode(payload.toJson())) as Map<String, dynamic>;
       _assertStructurallyEqual(golden, produced, '\$');
     });
+
+    test('pulse_submit_anonymous matches golden', () {
+      // Fully anonymous: no respondent ids, minimal context. Catches
+      // regressions where the SDK fabricates empty strings for
+      // missing identity fields rather than omitting them.
+      final golden = _readGolden('pulse_submit_anonymous.json');
+      const payload = PulseSubmitPayload(
+        surveyId: 'psv_anon_001',
+        respondent: PulseRespondent(),
+        context: PulseContext(
+          sessionId: null,
+          anonymousId: null,
+          platform: 'contract-test',
+          osVersion: null,
+          appVersion: null,
+          locale: null,
+        ),
+        answers: {'q1': 'anonymous'},
+      );
+      final produced =
+          jsonDecode(jsonEncode(payload.toJson())) as Map<String, dynamic>;
+      _assertStructurallyEqual(golden, produced, '\$');
+    });
+
+    test('pulse_submit_all_answer_kinds matches golden', () {
+      // Every supported answer value type encoded into a single
+      // payload — catches encoder regressions that only affect a
+      // specific kind.
+      final golden = _readGolden('pulse_submit_all_answer_kinds.json');
+      const payload = PulseSubmitPayload(
+        surveyId: 'psv_kinds_001',
+        respondent: PulseRespondent(externalId: 'ext_42'),
+        context: PulseContext(
+          sessionId: null,
+          anonymousId: null,
+          platform: 'contract-test',
+          osVersion: null,
+          appVersion: null,
+          locale: null,
+          replaySessionId: 'rep_abc',
+        ),
+        answers: {
+          'short_text': 'hello',
+          'long_text': 'the app feels slow when I open the cart screen',
+          'number': 42,
+          'rating': 4,
+          'nps': 9,
+          'single': 'key_pro',
+          'multi': ['key_a', 'key_c'],
+          'boolean': true,
+          'slider': 75,
+          'date': '2026-05-01',
+          'ranking': ['key_b', 'key_a', 'key_c'],
+          'matrix': {'row_a': 'col_x', 'row_b': 'col_y'},
+          'consent': true,
+          'image_choice': 'key_blue',
+          'maxdiff': {'best': 'key_a', 'worst': 'key_c'},
+          'signature': 'data:image/png;base64,iVBORw0KGgo=',
+        },
+      );
+      final produced =
+          jsonDecode(jsonEncode(payload.toJson())) as Map<String, dynamic>;
+      _assertStructurallyEqual(golden, produced, '\$');
+    });
   });
 }
 

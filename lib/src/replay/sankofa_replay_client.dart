@@ -46,6 +46,13 @@ class SankofaReplay {
   @visibleForTesting
   int get currentChunkIndex => _uploader.chunkIndex;
 
+  /// Sibling-module accessor for the active replay session id.
+  /// Returns the empty string when configure() hasn't been called
+  /// yet (replay sampled out, recordSessions=false, or pre-handshake);
+  /// callers like SankofaPulse map empty → null on the wire so
+  /// "no recording" is distinguishable from "replay session unknown".
+  String get activeSessionId => _uploader.sessionId;
+
   @visibleForTesting
   Future<void> resetForTesting() async {
     _recorder.stopRecording();

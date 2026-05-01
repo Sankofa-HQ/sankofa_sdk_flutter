@@ -6,13 +6,16 @@ import 'package:flutter/material.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 
 import '../core/module_registry.dart';
+import '../replay/sankofa_replay.dart';
 import '../sankofa_client.dart';
+import '../switch/sankofa_switch.dart';
 import 'branching.dart';
 import 'pulse_client.dart';
 import 'pulse_models.dart';
 import 'pulse_queue.dart';
 import 'survey_dialog.dart';
 import 'targeting.dart';
+import 'translator.dart';
 
 /// Sankofa Pulse — in-app surveys on Flutter.
 ///
@@ -43,6 +46,10 @@ class SankofaPulse implements SankofaModule {
   bool _enabled = true;
   List<PulseSurvey> _cached = const [];
   Future<void>? _refreshFuture;
+
+  /// Lifecycle event listener registry. Per-event buckets so an
+  /// `onCompleted` subscriber doesn't run for `dismissed` events.
+  final Map<PulseEvent, Set<PulseEventListener>> _listeners = {};
 
   @override
   SankofaModuleName get name => SankofaModuleName.pulseModule;
@@ -130,6 +137,49 @@ class SankofaPulse implements SankofaModule {
   /// Useful right after identify().
   Future<void> refreshSurveys() => _refreshSurveys();
 
+  // ── Lifecycle event subscriptions ───────────────────────────────────
+
+  /// Subscribe to one Pulse lifecycle event. Returns a
+  /// [PulseSubscription] handle — call its `cancel()` to remove the
+  /// listener. Mirrors the Web SDK's `Sankofa.pulse.on(event, listener)`
+  /// shape so a host swapping between platforms doesn't relearn the
+  /// API.
+  PulseSubscription on(PulseEvent event, PulseEventListener listener) {
+    final bucket = _listeners.putIfAbsent(event, () => <PulseEventListener>{});
+    bucket.add(listener);
+    return PulseSubscription(() {
+      final b = _listeners[event];
+      if (b == null) return;
+      b.remove(listener);
+      if (b.isEmpty) _listeners.remove(event);
+    });
+  }
+
+  void _emit(PulseEventPayload payload) {
+    // Auto-emit into the host's analytics queue with a "$pulse."
+    // prefix so survey lifecycle shows up in the same dashboard /
+    // warehouse as every other event the host tracks. Listeners
+    // registered through on(...) still fire as well — that path is
+    // for in-process integrations (Slack pings, conditional UI),
+    // not for analytics.
+    final trackProps = <String, Object>{'survey_id': payload.surveyId};
+    if (payload.responseId != null) trackProps['response_id'] = payload.responseId!;
+    if (payload.reason != null) trackProps['reason'] = payload.reason!;
+    unawaited(Sankofa.instance
+        .track('\$pulse.${payload.event.wireName}', trackProps)
+        .catchError((_) {}));
+
+    final bucket = _listeners[payload.event];
+    if (bucket == null) return;
+    for (final l in bucket.toList()) {
+      try {
+        l(payload);
+      } catch (e) {
+        if (kDebugMode) debugPrint('[Sankofa] pulse listener threw: $e');
+      }
+    }
+  }
+
   // ── Programmatic presentation ─────────────────────────────────────
 
   /// Show a survey by id. Fetches the full bundle, runs targeting
@@ -187,8 +237,37 @@ class SankofaPulse implements SankofaModule {
       }
       return;
     }
+    // Hydrate from any in-progress partial. Load failures (offline,
+    // expired, server error) are swallowed — the survey simply
+    // starts fresh, which is strictly better than refusing to show.
+    final externalId = Sankofa.instance.identity?.distinctId ?? '';
+    PulsePartial? partial;
+    if (externalId.isNotEmpty) {
+      try {
+        partial = await c.loadPartial(
+          surveyId: surveyId,
+          externalId: externalId,
+        );
+      } catch (_) {
+        partial = null;
+      }
+    }
+
     if (!context.mounted) return;
-    await _present(context, bundle.survey, bundle.branchingRules);
+    final translator = PulseTranslator.build(
+      bundle.translations,
+      deviceLocale: WidgetsBinding.instance.platformDispatcher.locale.toLanguageTag(),
+    );
+    await _present(
+      context,
+      surveyId: surveyId,
+      survey: bundle.survey,
+      branchingRules: bundle.branchingRules,
+      translator: translator,
+      externalId: externalId,
+      initialAnswers: partial?.answers ?? const {},
+      initialQuestionId: partial?.currentQuestionId,
+    );
   }
 
   /// Returns the targeting Decision for [surveyId] without showing.
@@ -237,43 +316,176 @@ class SankofaPulse implements SankofaModule {
       surveyId: surveyId,
       respondentExternalId: identity?.distinctId ?? '',
       userProperties: properties,
-      flagValues: flags,
+      flagValues: _mergeWithSwitchFlags(flags),
     );
     return evaluatePulseTargeting(rules, ctx);
   }
 
+  /// Merge SankofaSwitch flag values into the eligibility context
+  /// so feature_flag rules can target without the host re-passing
+  /// every flag. Host-supplied [overrides] win over Switch values
+  /// by key — that lets a host force a flag for testing without
+  /// the runtime Switch decision overriding them.
+  Map<String, Object?> _mergeWithSwitchFlags(Map<String, Object?> overrides) {
+    final switches = SankofaSwitch.instance;
+    if (switches == null) return overrides;
+    final merged = <String, Object?>{};
+    try {
+      for (final key in switches.getAllKeys()) {
+        final decision = switches.getDecision(key);
+        if (decision == null) continue;
+        // For variant flags we expose the variant string; for
+        // boolean flags we expose the bool value. The targeting
+        // evaluator's _jsonEqual handles either.
+        merged[key] =
+            decision.variant.isNotEmpty ? decision.variant : decision.value;
+      }
+    } catch (e) {
+      if (kDebugMode) debugPrint('[Sankofa] switch flag merge failed: $e');
+    }
+    merged.addAll(overrides);
+    return merged;
+  }
+
   Future<void> _present(
-    BuildContext context,
-    PulseSurvey survey,
-    List<PulseBranchingRule> branchingRules,
-  ) {
-    return showDialog<void>(
+    BuildContext context, {
+    required String surveyId,
+    required PulseSurvey survey,
+    required List<PulseBranchingRule> branchingRules,
+    required String externalId,
+    PulseTranslator? translator,
+    Map<String, Object?> initialAnswers = const {},
+    String? initialQuestionId,
+  }) {
+    final fut = showDialog<void>(
       context: context,
       barrierDismissible: true,
       builder: (ctx) => SankofaSurveyDialog(
         survey: survey,
         branchingRules: branchingRules,
+        translator: translator,
+        initialAnswers: initialAnswers,
+        initialQuestionId: initialQuestionId,
+        onProgress: externalId.isEmpty
+            ? null
+            : (answers, currentQuestionId) {
+                _schedulePartialSave(
+                  surveyId: surveyId,
+                  externalId: externalId,
+                  answers: answers,
+                  currentQuestionId: currentQuestionId,
+                );
+              },
         onSubmit: (payload) {
-          _handleSubmit(_enrichContext(payload));
+          // Server auto-deletes the partial on a successful insert.
+          // Best-effort client-side delete too so a dismissed-then-
+          // resumed-in-a-different-session doesn't surface a stale
+          // partial during the brief window.
+          _handleSubmit(_enrichContext(payload), surveyId: surveyId);
+          if (externalId.isNotEmpty) {
+            unawaited(_deletePartial(surveyId, externalId));
+          }
           Navigator.of(ctx).maybePop();
         },
-        onDismiss: () {},
+        onDismiss: () {
+          _emit(PulseEventPayload(
+            event: PulseEvent.surveyDismissed,
+            surveyId: surveyId,
+          ));
+          // Keep partial intact for resume — that's the whole point.
+        },
       ),
     );
+    _emit(PulseEventPayload(
+      event: PulseEvent.surveyShown,
+      surveyId: surveyId,
+    ));
+    return fut;
+  }
+
+  // ── Partial save scheduler ──────────────────────────────────────────
+  //
+  // Coalesce saves on a 750ms debounce: a fast-clicking respondent
+  // who skips through 5 questions in a second only burns one save call,
+  // and the latest pending state always wins.
+
+  static const Duration _partialDebounce = Duration(milliseconds: 750);
+  Timer? _partialSaveTimer;
+
+  void _schedulePartialSave({
+    required String surveyId,
+    required String externalId,
+    required Map<String, Object?> answers,
+    required String currentQuestionId,
+  }) {
+    _partialSaveTimer?.cancel();
+    _partialSaveTimer = Timer(_partialDebounce, () {
+      unawaited(_savePartial(
+        surveyId: surveyId,
+        externalId: externalId,
+        answers: answers,
+        currentQuestionId: currentQuestionId,
+      ));
+    });
+  }
+
+  Future<void> _savePartial({
+    required String surveyId,
+    required String externalId,
+    required Map<String, Object?> answers,
+    required String currentQuestionId,
+  }) async {
+    final c = _client;
+    if (c == null) return;
+    try {
+      await c.savePartial(PulsePartialUpsert(
+        surveyId: surveyId,
+        respondent: PulseRespondent(externalId: externalId),
+        context: _buildPulseContext(),
+        answers: answers,
+        currentQuestionId: currentQuestionId,
+      ));
+      _emit(PulseEventPayload(
+        event: PulseEvent.surveyPartialSaved,
+        surveyId: surveyId,
+      ));
+    } catch (e) {
+      if (kDebugMode) debugPrint('[Sankofa] partial save failed: $e');
+    }
+  }
+
+  Future<void> _deletePartial(String surveyId, String externalId) async {
+    final c = _client;
+    if (c == null) return;
+    try {
+      await c.deletePartial(surveyId: surveyId, externalId: externalId);
+    } catch (_) {
+      // Server auto-cleans on submit anyway; ignore.
+    }
   }
 
   // ── Submission ────────────────────────────────────────────────────
 
-  void _handleSubmit(PulseSubmitPayload payload) {
+  void _handleSubmit(PulseSubmitPayload payload, {required String surveyId}) {
     final c = _client;
     final q = _queue;
     if (c == null) return;
     unawaited(() async {
       try {
-        await c.submit(payload);
+        final resp = await c.submit(payload);
+        // Fire SURVEY_COMPLETED with the server-issued response id
+        // so hosts can correlate against dashboard rows.
+        _emit(PulseEventPayload(
+          event: PulseEvent.surveyCompleted,
+          surveyId: surveyId,
+          responseId: resp.id,
+        ));
         if (q != null) await q.drain((p) => c.submit(p));
       } catch (_) {
-        // Network down — persist for next drain.
+        // Network down — persist for next drain. We deliberately
+        // do NOT fire SURVEY_COMPLETED yet; the host's analytics
+        // should treat "submitted to local queue" differently from
+        // "server confirmed".
         if (q != null) await q.enqueue(payload);
       }
     }());
@@ -281,14 +493,7 @@ class SankofaPulse implements SankofaModule {
 
   PulseSubmitPayload _enrichContext(PulseSubmitPayload payload) {
     final host = Sankofa.instance;
-    final ctx = PulseContext(
-      sessionId: host.sessionManager?.sessionId,
-      anonymousId: host.identity?.anonymousId,
-      platform: 'flutter',
-      osVersion: _osVersion(),
-      appVersion: _appVersion,
-      locale: WidgetsBinding.instance.platformDispatcher.locale.toLanguageTag(),
-    );
+    final ctx = _buildPulseContext();
     final distinct = host.identity?.distinctId;
     final respondent = payload.respondent.copyWith(
       externalId: payload.respondent.externalId ??
@@ -323,6 +528,29 @@ class SankofaPulse implements SankofaModule {
     }();
     _refreshFuture = fut;
     return fut;
+  }
+
+  /// Build the per-call [PulseContext] used by both the final
+  /// submit payload and any partial-save calls. Centralising here
+  /// keeps "what we tell the server about this device" in one
+  /// place — drift between submit + partial would surface as
+  /// inconsistent dashboard rows for the same respondent.
+  PulseContext _buildPulseContext() {
+    final host = Sankofa.instance;
+    // SankofaReplay.instance.currentSessionId is "" before
+    // configure() runs (replay sampled out, recordSessions=false,
+    // or pre-handshake). We map empty → null so the wire field
+    // distinguishes "no recording" from "replay session unknown".
+    final replaySid = SankofaReplay.instance.activeSessionId;
+    return PulseContext(
+      sessionId: host.sessionManager?.sessionId,
+      anonymousId: host.identity?.anonymousId,
+      platform: 'flutter',
+      osVersion: _osVersion(),
+      appVersion: _appVersion,
+      locale: WidgetsBinding.instance.platformDispatcher.locale.toLanguageTag(),
+      replaySessionId: replaySid.isEmpty ? null : replaySid,
+    );
   }
 
   // App + OS version cached lazily so we don't hit the platform

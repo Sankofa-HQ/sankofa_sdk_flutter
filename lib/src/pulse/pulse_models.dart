@@ -159,18 +159,25 @@ class PulseHandshakeResponse {
 }
 
 /// Full survey bundle — survey row + targeting rules + branching
-/// rules. Themes, translations, and partial state will land here as
-/// those features graduate; the Go-side wire shape includes them
-/// all already.
+/// rules + translations. Themes and partial state will land here
+/// as those features graduate; the Go-side wire shape includes
+/// them all already.
 class PulseSurveyBundle {
   final PulseSurvey survey;
   final List<PulseTargetingRule> targetingRules;
   final List<PulseBranchingRule> branchingRules;
 
+  /// Per-locale string overrides keyed first by BCP-47 locale tag
+  /// (e.g. "en-US"), then by the dot-path key (e.g.
+  /// "question.psq_q1.prompt"). Empty when the survey hasn't been
+  /// translated.
+  final Map<String, Map<String, String>> translations;
+
   const PulseSurveyBundle({
     this.survey = const PulseSurvey(id: '', kind: '', name: ''),
     this.targetingRules = const [],
     this.branchingRules = const [],
+    this.translations = const {},
   });
 
   factory PulseSurveyBundle.fromJson(Map<String, dynamic> json) {
@@ -178,6 +185,7 @@ class PulseSurveyBundle {
     final rawQuestions = json['questions'];
     final rawTargeting = json['targeting_rules'];
     final rawBranching = json['branching_rules'];
+    final rawTranslations = json['translations'];
 
     PulseSurvey survey = const PulseSurvey(id: '', kind: '', name: '');
     if (rawSurvey is Map<String, dynamic>) {
@@ -212,10 +220,27 @@ class PulseSurveyBundle {
             .map(PulseBranchingRule.fromJson)
             .toList()
         : <PulseBranchingRule>[];
+    final translations = <String, Map<String, String>>{};
+    if (rawTranslations is Map) {
+      rawTranslations.forEach((locale, strings) {
+        if (strings is Map) {
+          final stringMap = <String, String>{};
+          strings.forEach((k, v) {
+            if (k != null && v != null) {
+              stringMap[k.toString()] = v.toString();
+            }
+          });
+          if (stringMap.isNotEmpty) {
+            translations[locale.toString()] = stringMap;
+          }
+        }
+      });
+    }
     return PulseSurveyBundle(
       survey: survey,
       targetingRules: targeting,
       branchingRules: branching,
+      translations: translations,
     );
   }
 }
@@ -267,6 +292,12 @@ class PulseContext {
   final String? appVersion;
   final String? locale;
 
+  /// Session id of the active replay recording, when replay is on.
+  /// Lets the dashboard deep-link from a Pulse response straight to
+  /// the recorded session. Null when replay is disabled, sampled
+  /// out, or not yet started.
+  final String? replaySessionId;
+
   const PulseContext({
     this.sessionId,
     this.anonymousId,
@@ -274,6 +305,7 @@ class PulseContext {
     this.osVersion,
     this.appVersion,
     this.locale,
+    this.replaySessionId,
   });
 
   Map<String, dynamic> toJson() {
@@ -284,6 +316,7 @@ class PulseContext {
     if (osVersion != null) map['os_version'] = osVersion;
     if (appVersion != null) map['app_version'] = appVersion;
     if (locale != null) map['locale'] = locale;
+    if (replaySessionId != null) map['replay_session_id'] = replaySessionId;
     return map;
   }
 
@@ -294,6 +327,7 @@ class PulseContext {
         osVersion: json['os_version'] as String?,
         appVersion: json['app_version'] as String?,
         locale: json['locale'] as String?,
+        replaySessionId: json['replay_session_id'] as String?,
       );
 }
 
@@ -465,6 +499,68 @@ class PulsePartial {
       expiresAt: json['expires_at'] as String?,
       updatedAt: json['updated_at'] as String?,
     );
+  }
+}
+
+/// Lifecycle events the SDK fires while a survey is on screen.
+/// Hosts subscribe via `SankofaPulse.instance.on(...)` to wire
+/// Pulse into their own analytics / CRM / replay tooling.
+enum PulseEvent {
+  /// Fired right after the survey dialog opens.
+  surveyShown,
+
+  /// Fired when the respondent closes without submitting.
+  surveyDismissed,
+
+  /// Fired after a successful submission.
+  surveyCompleted,
+
+  /// Fired after a successful partial-state save.
+  surveyPartialSaved;
+
+  String get wireName {
+    switch (this) {
+      case PulseEvent.surveyShown:
+        return 'survey_shown';
+      case PulseEvent.surveyDismissed:
+        return 'survey_dismissed';
+      case PulseEvent.surveyCompleted:
+        return 'survey_completed';
+      case PulseEvent.surveyPartialSaved:
+        return 'survey_partial_saved';
+    }
+  }
+}
+
+/// Payload delivered to every [PulseEventListener]. `responseId`
+/// is only populated on [PulseEvent.surveyCompleted]; `reason` is
+/// populated on dismissal when we have one (e.g. eligibility miss).
+class PulseEventPayload {
+  final PulseEvent event;
+  final String surveyId;
+  final String? responseId;
+  final String? reason;
+
+  const PulseEventPayload({
+    required this.event,
+    required this.surveyId,
+    this.responseId,
+    this.reason,
+  });
+}
+
+typedef PulseEventListener = void Function(PulseEventPayload payload);
+
+/// Token returned by `SankofaPulse.instance.on(...)`. Hold it to
+/// keep the listener alive; call [cancel] to remove it. The
+/// constructor is public for SDK-internal use; hosts should only
+/// ever obtain instances by calling `on(...)`.
+class PulseSubscription {
+  PulseSubscription(this._cancel);
+  void Function()? _cancel;
+  void cancel() {
+    _cancel?.call();
+    _cancel = null;
   }
 }
 

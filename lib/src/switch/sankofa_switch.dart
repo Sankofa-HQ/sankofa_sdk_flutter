@@ -23,6 +23,13 @@ import 'flag_decision.dart';
 /// default or the last persisted decision from SharedPreferences
 /// (7-day stale-while-revalidate window).
 class SankofaSwitch implements SankofaModule {
+  /// Last-constructed instance of [SankofaSwitch]. Sibling modules
+  /// (Pulse) read this to merge flag values into eligibility
+  /// contexts without hard-coupling to a specific host instance.
+  /// Null when the host hasn't instantiated `SankofaSwitch` yet —
+  /// callers must handle that gracefully.
+  static SankofaSwitch? instance;
+
   static const String _storageKey = 'sankofa:switch:state';
   static const Duration _staleMax = Duration(days: 7);
 
@@ -40,6 +47,7 @@ class SankofaSwitch implements SankofaModule {
   SankofaSwitch({Map<String, FlagDecision>? defaults})
       : _defaults = defaults ?? const {} {
     SankofaModuleRegistry.instance.register(this);
+    SankofaSwitch.instance = this;
     // Fire-and-forget hydrate from SharedPreferences. `getFlag()` calls
     // made before hydrate completes return the bundled default — the
     // first handful of frames at app launch are the rare window where

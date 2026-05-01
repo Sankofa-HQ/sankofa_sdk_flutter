@@ -54,7 +54,11 @@ export 'src/pulse/pulse_models.dart'
         PulseSubmitPayload,
         PulseSubmitResponse,
         PulseContext,
-        PulseHandshakeResponse;
+        PulseHandshakeResponse,
+        PulseEvent,
+        PulseEventPayload,
+        PulseEventListener,
+        PulseSubscription;
 export 'src/pulse/targeting.dart'
     show
         PulseTargetingRule,
@@ -75,4 +79,5 @@ export 'src/pulse/branching.dart'
         pulseBranchingEndOfSurvey,
         resolvePulseBranching,
         evaluatePulseBranchingCondition;
+export 'src/pulse/translator.dart' show PulseTranslator;
 export 'src/pulse/survey_dialog.dart' show SankofaSurveyDialog;
