@@ -40,3 +40,39 @@ export 'src/catch/catch_types.dart'
         CatchStackFrame,
         CatchStackTrace,
         CatchUserContext;
+
+// Sankofa Pulse — in-app surveys
+export 'src/pulse/sankofa_pulse.dart' show SankofaPulse;
+export 'src/pulse/pulse_models.dart'
+    show
+        PulseSurvey,
+        PulseSurveyBundle,
+        PulseQuestion,
+        PulseQuestionOption,
+        PulseTheme,
+        PulseRespondent,
+        PulseSubmitPayload,
+        PulseSubmitResponse,
+        PulseContext,
+        PulseHandshakeResponse;
+export 'src/pulse/targeting.dart'
+    show
+        PulseTargetingRule,
+        PulseEligibilityContext,
+        PulseDecision,
+        PulseRuleKind,
+        PulseMatchOp,
+        evaluatePulseTargeting,
+        pulseStableHash;
+export 'src/pulse/branching.dart'
+    show
+        PulseBranchingRule,
+        PulseBranchingCondition,
+        PulseOutcome,
+        PulseBranchingActionKind,
+        PulseBranchingCondKind,
+        PulseBranchingCondOp,
+        pulseBranchingEndOfSurvey,
+        resolvePulseBranching,
+        evaluatePulseBranchingCondition;
+export 'src/pulse/survey_dialog.dart' show SankofaSurveyDialog;

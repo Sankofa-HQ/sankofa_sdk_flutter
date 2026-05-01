@@ -27,7 +27,14 @@ import 'package:flutter/foundation.dart';
 /// The `-Module` suffix on `catchModule`, `switchModule`, `configModule`
 /// avoids clashes with Dart keywords (`catch`, `switch`) and common
 /// stdlib names. The wire name (what the server speaks) stays clean.
-enum SankofaModuleName { analytics, deploy, catchModule, switchModule, configModule }
+enum SankofaModuleName {
+  analytics,
+  deploy,
+  catchModule,
+  switchModule,
+  configModule,
+  pulseModule,
+}
 
 extension SankofaModuleNameExt on SankofaModuleName {
   String get wireName {
@@ -42,6 +49,8 @@ extension SankofaModuleNameExt on SankofaModuleName {
         return 'switch';
       case SankofaModuleName.configModule:
         return 'config';
+      case SankofaModuleName.pulseModule:
+        return 'pulse';
     }
   }
 }
@@ -164,6 +173,21 @@ class SankofaModuleRegistry {
           '[Sankofa] Server enabled "config" but SankofaConfig is not '
           'installed. Import sankofa_flutter and instantiate '
           'SankofaConfig() after Sankofa.instance.init().',
+        );
+      }
+    }
+
+    // Pulse — in-app surveys
+    final pulseCfg = modules['pulse'] as Map<String, dynamic>?;
+    if (pulseCfg != null && pulseCfg['enabled'] == true) {
+      final mod = _registered[SankofaModuleName.pulseModule];
+      if (mod != null) {
+        await mod.applyHandshake(pulseCfg);
+      } else if (kDebugMode) {
+        debugPrint(
+          '[Sankofa] Server enabled "pulse" but SankofaPulse is not '
+          'installed. Call SankofaPulse.instance.register() after '
+          'Sankofa.instance.init().',
         );
       }
     }

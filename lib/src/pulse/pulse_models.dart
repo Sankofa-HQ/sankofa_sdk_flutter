@@ -1,0 +1,482 @@
+/// Wire-shape types for the Pulse Flutter SDK. Mirrors the server's
+/// JSON envelopes from `server/engine/ee/pulse/`.
+///
+/// Kept in one file so the network layer + the renderer share a
+/// single source of truth — drift here would silently break ingest.
+library sankofa_flutter.pulse.models;
+
+import 'branching.dart';
+import 'targeting.dart';
+
+class PulseQuestionOption {
+  final String key;
+  final String label;
+  final String? imageUrl;
+
+  const PulseQuestionOption({
+    required this.key,
+    required this.label,
+    this.imageUrl,
+  });
+
+  factory PulseQuestionOption.fromJson(Map<String, dynamic> json) =>
+      PulseQuestionOption(
+        key: json['key'] as String? ?? '',
+        label: json['label'] as String? ?? '',
+        imageUrl: json['image_url'] as String?,
+      );
+}
+
+class PulseQuestion {
+  final String id;
+  final String kind;
+  final String prompt;
+  final String? helptext;
+  final bool required;
+  final int orderIndex;
+  final List<PulseQuestionOption>? options;
+
+  /// Per-kind validation block; opaque map decoded lazily by the
+  /// renderer (e.g. `min`/`max` for `slider`, `min_length` for text).
+  final Map<String, dynamic>? validation;
+
+  const PulseQuestion({
+    required this.id,
+    required this.kind,
+    required this.prompt,
+    this.helptext,
+    this.required = false,
+    this.orderIndex = 0,
+    this.options,
+    this.validation,
+  });
+
+  factory PulseQuestion.fromJson(Map<String, dynamic> json) {
+    final rawOptions = json['options'] as List<dynamic>?;
+    return PulseQuestion(
+      id: json['id'] as String? ?? '',
+      kind: json['kind'] as String? ?? '',
+      prompt: json['prompt'] as String? ?? '',
+      helptext: json['helptext'] as String?,
+      required: json['required'] as bool? ?? false,
+      orderIndex: (json['order_index'] as num?)?.toInt() ?? 0,
+      options: rawOptions
+          ?.whereType<Map<String, dynamic>>()
+          .map(PulseQuestionOption.fromJson)
+          .toList(),
+      validation: (json['validation'] as Map?)?.cast<String, dynamic>(),
+    );
+  }
+}
+
+class PulseTheme {
+  final String? primaryColor;
+  final String? backgroundColor;
+  final String? foregroundColor;
+  final String? mutedColor;
+  final String? borderColor;
+  final String? fontFamily;
+  final String? darkMode;
+  final String? logoUrl;
+
+  const PulseTheme({
+    this.primaryColor,
+    this.backgroundColor,
+    this.foregroundColor,
+    this.mutedColor,
+    this.borderColor,
+    this.fontFamily,
+    this.darkMode,
+    this.logoUrl,
+  });
+
+  factory PulseTheme.fromJson(Map<String, dynamic> json) => PulseTheme(
+        primaryColor: json['primary_color'] as String?,
+        backgroundColor: json['background_color'] as String?,
+        foregroundColor: json['foreground_color'] as String?,
+        mutedColor: json['muted_color'] as String?,
+        borderColor: json['border_color'] as String?,
+        fontFamily: json['font_family'] as String?,
+        darkMode: json['dark_mode'] as String?,
+        logoUrl: json['logo_url'] as String?,
+      );
+}
+
+class PulseSurvey {
+  final String id;
+  final String kind;
+  final String name;
+  final String? description;
+  final List<PulseQuestion> questions;
+  final PulseTheme? theme;
+
+  const PulseSurvey({
+    required this.id,
+    required this.kind,
+    required this.name,
+    this.description,
+    this.questions = const [],
+    this.theme,
+  });
+
+  factory PulseSurvey.fromJson(Map<String, dynamic> json) {
+    final rawQuestions = json['questions'] as List<dynamic>?;
+    final rawTheme = json['theme'];
+    return PulseSurvey(
+      id: json['id'] as String? ?? '',
+      kind: json['kind'] as String? ?? '',
+      name: json['name'] as String? ?? '',
+      description: json['description'] as String?,
+      questions: rawQuestions == null
+          ? const []
+          : rawQuestions
+              .whereType<Map<String, dynamic>>()
+              .map(PulseQuestion.fromJson)
+              .toList(),
+      theme: rawTheme is Map<String, dynamic>
+          ? PulseTheme.fromJson(rawTheme)
+          : null,
+    );
+  }
+}
+
+class PulseHandshakeResponse {
+  final List<PulseSurvey> surveys;
+
+  const PulseHandshakeResponse({this.surveys = const []});
+
+  factory PulseHandshakeResponse.fromJson(Map<String, dynamic> json) {
+    final raw = json['surveys'] as List<dynamic>?;
+    return PulseHandshakeResponse(
+      surveys: raw == null
+          ? const []
+          : raw
+              .whereType<Map<String, dynamic>>()
+              .map(PulseSurvey.fromJson)
+              .toList(),
+    );
+  }
+}
+
+/// Full survey bundle — survey row + targeting rules + branching
+/// rules. Themes, translations, and partial state will land here as
+/// those features graduate; the Go-side wire shape includes them
+/// all already.
+class PulseSurveyBundle {
+  final PulseSurvey survey;
+  final List<PulseTargetingRule> targetingRules;
+  final List<PulseBranchingRule> branchingRules;
+
+  const PulseSurveyBundle({
+    this.survey = const PulseSurvey(id: '', kind: '', name: ''),
+    this.targetingRules = const [],
+    this.branchingRules = const [],
+  });
+
+  factory PulseSurveyBundle.fromJson(Map<String, dynamic> json) {
+    final rawSurvey = json['survey'];
+    final rawQuestions = json['questions'];
+    final rawTargeting = json['targeting_rules'];
+    final rawBranching = json['branching_rules'];
+
+    PulseSurvey survey = const PulseSurvey(id: '', kind: '', name: '');
+    if (rawSurvey is Map<String, dynamic>) {
+      survey = PulseSurvey.fromJson(rawSurvey);
+    }
+    // The bundle ships questions on a sibling key, not nested in
+    // survey — attach them here so callers see one self-contained
+    // PulseSurvey.
+    if (rawQuestions is List) {
+      final questions = rawQuestions
+          .whereType<Map<String, dynamic>>()
+          .map(PulseQuestion.fromJson)
+          .toList();
+      survey = PulseSurvey(
+        id: survey.id,
+        kind: survey.kind,
+        name: survey.name,
+        description: survey.description,
+        questions: questions,
+        theme: survey.theme,
+      );
+    }
+    final targeting = rawTargeting is List
+        ? rawTargeting
+            .whereType<Map<String, dynamic>>()
+            .map(PulseTargetingRule.fromJson)
+            .toList()
+        : <PulseTargetingRule>[];
+    final branching = rawBranching is List
+        ? rawBranching
+            .whereType<Map<String, dynamic>>()
+            .map(PulseBranchingRule.fromJson)
+            .toList()
+        : <PulseBranchingRule>[];
+    return PulseSurveyBundle(
+      survey: survey,
+      targetingRules: targeting,
+      branchingRules: branching,
+    );
+  }
+}
+
+/// Respondent identity envelope. Mirrors the server's
+/// `ingestRespondent` shape (server/engine/ee/pulse/handlers_ingest.go).
+/// At least one of the three fields should be set; the server tolerates
+/// all-empty for fully anonymous submissions but the dashboard groups
+/// responses by the most-specific id present.
+class PulseRespondent {
+  final String? userId;
+  final String? externalId;
+  final String? email;
+
+  const PulseRespondent({this.userId, this.externalId, this.email});
+
+  PulseRespondent copyWith({
+    String? userId,
+    String? externalId,
+    String? email,
+  }) =>
+      PulseRespondent(
+        userId: userId ?? this.userId,
+        externalId: externalId ?? this.externalId,
+        email: email ?? this.email,
+      );
+
+  Map<String, dynamic> toJson() {
+    final m = <String, dynamic>{};
+    if (userId != null) m['user_id'] = userId;
+    if (externalId != null) m['external_id'] = externalId;
+    if (email != null) m['email'] = email;
+    return m;
+  }
+
+  factory PulseRespondent.fromJson(Map<String, dynamic> json) =>
+      PulseRespondent(
+        userId: json['user_id'] as String?,
+        externalId: json['external_id'] as String?,
+        email: json['email'] as String?,
+      );
+}
+
+class PulseContext {
+  final String? sessionId;
+  final String? anonymousId;
+  final String? platform;
+  final String? osVersion;
+  final String? appVersion;
+  final String? locale;
+
+  const PulseContext({
+    this.sessionId,
+    this.anonymousId,
+    this.platform = 'flutter',
+    this.osVersion,
+    this.appVersion,
+    this.locale,
+  });
+
+  Map<String, dynamic> toJson() {
+    final map = <String, dynamic>{};
+    if (sessionId != null) map['session_id'] = sessionId;
+    if (anonymousId != null) map['anonymous_id'] = anonymousId;
+    if (platform != null) map['platform'] = platform;
+    if (osVersion != null) map['os_version'] = osVersion;
+    if (appVersion != null) map['app_version'] = appVersion;
+    if (locale != null) map['locale'] = locale;
+    return map;
+  }
+
+  factory PulseContext.fromJson(Map<String, dynamic> json) => PulseContext(
+        sessionId: json['session_id'] as String?,
+        anonymousId: json['anonymous_id'] as String?,
+        platform: json['platform'] as String? ?? 'flutter',
+        osVersion: json['os_version'] as String?,
+        appVersion: json['app_version'] as String?,
+        locale: json['locale'] as String?,
+      );
+}
+
+/// Final-submit payload. The wire shape matches the server's
+/// `ingestPayload`: `answers` is a map keyed by question_id (NOT a
+/// list of `{question_id, value}` pairs — that earlier shape was
+/// silently 400'd in production because the Go decoder treats arrays
+/// + maps as different types). Web + RN already speak this shape;
+/// iOS, Android, and Flutter follow.
+class PulseSubmitPayload {
+  final String surveyId;
+  final PulseRespondent respondent;
+  final PulseContext? context;
+  final String? submittedAt;
+  final Map<String, Object?> answers;
+
+  const PulseSubmitPayload({
+    required this.surveyId,
+    this.respondent = const PulseRespondent(),
+    this.context,
+    this.submittedAt,
+    this.answers = const {},
+  });
+
+  PulseSubmitPayload copyWith({
+    String? surveyId,
+    PulseRespondent? respondent,
+    PulseContext? context,
+    String? submittedAt,
+    Map<String, Object?>? answers,
+  }) =>
+      PulseSubmitPayload(
+        surveyId: surveyId ?? this.surveyId,
+        respondent: respondent ?? this.respondent,
+        context: context ?? this.context,
+        submittedAt: submittedAt ?? this.submittedAt,
+        answers: answers ?? this.answers,
+      );
+
+  Map<String, dynamic> toJson() {
+    final map = <String, dynamic>{
+      'survey_id': surveyId,
+      'respondent': respondent.toJson(),
+      'answers': answers,
+    };
+    if (context != null) map['context'] = context!.toJson();
+    if (submittedAt != null) map['submitted_at'] = submittedAt;
+    return map;
+  }
+
+  factory PulseSubmitPayload.fromJson(Map<String, dynamic> json) {
+    final rawAnswers = json['answers'];
+    final answers = rawAnswers is Map
+        ? Map<String, Object?>.from(rawAnswers.cast<String, Object?>())
+        : <String, Object?>{};
+    return PulseSubmitPayload(
+      surveyId: json['survey_id'] as String? ?? '',
+      respondent: json['respondent'] is Map<String, dynamic>
+          ? PulseRespondent.fromJson(json['respondent'] as Map<String, dynamic>)
+          : const PulseRespondent(),
+      context: json['context'] is Map<String, dynamic>
+          ? PulseContext.fromJson(json['context'] as Map<String, dynamic>)
+          : null,
+      submittedAt: json['submitted_at'] as String?,
+      answers: answers,
+    );
+  }
+}
+
+/// Wire payload for `POST /api/pulse/partial`. Same answers shape
+/// (map keyed by question_id) as the final-submit body so the SDK
+/// doesn't have to reformat between save + submit.
+class PulsePartialUpsert {
+  final String surveyId;
+  final PulseRespondent respondent;
+  final PulseContext? context;
+  final Map<String, Object?> answers;
+  final String? currentQuestionId;
+
+  const PulsePartialUpsert({
+    required this.surveyId,
+    required this.respondent,
+    this.context,
+    this.answers = const {},
+    this.currentQuestionId,
+  });
+
+  Map<String, dynamic> toJson() {
+    final m = <String, dynamic>{
+      'survey_id': surveyId,
+      'respondent': respondent.toJson(),
+      'answers': answers,
+    };
+    if (context != null) m['context'] = context!.toJson();
+    if (currentQuestionId != null) m['current_question_id'] = currentQuestionId;
+    return m;
+  }
+}
+
+/// Shape returned by `POST /api/pulse/partial`.
+class PulsePartialAck {
+  final String? id;
+  final String? surveyId;
+  final String? currentQuestionId;
+  final int? versionNumber;
+  final String? expiresAt;
+  final String? updatedAt;
+
+  const PulsePartialAck({
+    this.id,
+    this.surveyId,
+    this.currentQuestionId,
+    this.versionNumber,
+    this.expiresAt,
+    this.updatedAt,
+  });
+
+  factory PulsePartialAck.fromJson(Map<String, dynamic> json) =>
+      PulsePartialAck(
+        id: json['id'] as String?,
+        surveyId: json['survey_id'] as String?,
+        currentQuestionId: json['current_question_id'] as String?,
+        versionNumber: (json['version_number'] as num?)?.toInt(),
+        expiresAt: json['expires_at'] as String?,
+        updatedAt: json['updated_at'] as String?,
+      );
+}
+
+/// Shape returned by `GET /api/pulse/partial`. Mirrors the server's
+/// `ResponsePartial` row.
+class PulsePartial {
+  final String? id;
+  final String? surveyId;
+  final String? respondentExternalId;
+  final String? respondentUserId;
+  final String? respondentEmail;
+  final Map<String, Object?>? answers;
+  final String? currentQuestionId;
+  final int? versionNumber;
+  final String? expiresAt;
+  final String? updatedAt;
+
+  const PulsePartial({
+    this.id,
+    this.surveyId,
+    this.respondentExternalId,
+    this.respondentUserId,
+    this.respondentEmail,
+    this.answers,
+    this.currentQuestionId,
+    this.versionNumber,
+    this.expiresAt,
+    this.updatedAt,
+  });
+
+  factory PulsePartial.fromJson(Map<String, dynamic> json) {
+    final raw = json['answers'];
+    return PulsePartial(
+      id: json['id'] as String?,
+      surveyId: json['survey_id'] as String?,
+      respondentExternalId: json['respondent_external_id'] as String?,
+      respondentUserId: json['respondent_user_id'] as String?,
+      respondentEmail: json['respondent_email'] as String?,
+      answers: raw is Map
+          ? Map<String, Object?>.from(raw.cast<String, Object?>())
+          : null,
+      currentQuestionId: json['current_question_id'] as String?,
+      versionNumber: (json['version_number'] as num?)?.toInt(),
+      expiresAt: json['expires_at'] as String?,
+      updatedAt: json['updated_at'] as String?,
+    );
+  }
+}
+
+class PulseSubmitResponse {
+  final String? id;
+  final String? surveyId;
+
+  const PulseSubmitResponse({this.id, this.surveyId});
+
+  factory PulseSubmitResponse.fromJson(Map<String, dynamic> json) =>
+      PulseSubmitResponse(
+        id: json['id'] as String?,
+        surveyId: json['survey_id'] as String?,
+      );
+}
