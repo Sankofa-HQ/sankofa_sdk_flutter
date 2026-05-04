@@ -94,6 +94,11 @@ class _SetupScreenState extends State<SetupScreen>
         enableSessionReplay: _enableSessionReplay,
         replayMode: _replayMode,
       );
+      // Pulse registers AFTER init because it reads apiKey + endpoint
+      // at register-time (Switch/Config/Catch all pull lazily on
+      // first call). A failure here doesn't block the demo — the
+      // Pulse Lab screen will surface a "not registered" message.
+      await registerSankofaPulse();
       if (!mounted) return;
       Navigator.of(context).pushReplacement(
         MaterialPageRoute(builder: (_) => const EventTesterScreen()),

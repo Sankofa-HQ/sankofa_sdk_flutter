@@ -120,6 +120,47 @@ Map<String, ItemDecision> demoConfigDefaults() => {
       ),
     };
 
+/// Demo survey identifiers used by the Pulse Lab screen.
+///
+/// These IDs match what `seed_pulse` (server/engine/cmd/seed_pulse)
+/// publishes against the demo project. If the server hasn't been
+/// seeded yet the lab surfaces a "survey not found" message and the
+/// host can re-run the seeder. The IDs are intentionally short +
+/// human-readable so you can spot them in dashboard URLs.
+class DemoSurveys {
+  /// Classic 0–10 NPS prompt with a follow-up "why" question. The
+  /// follow-up is shown for detractors (NPS < 7) via a branching
+  /// rule so this demo also exercises skip-logic.
+  static const npsAfterCheckout = 'psv_demo_nps_checkout';
+
+  /// 1–5 CSAT rating against the support experience. Single
+  /// question, no branching — the simplest possible flow for first
+  /// runs / smoke tests.
+  static const csatSupport = 'psv_demo_csat_support';
+
+  /// Multi-question custom survey (single + multi + long-text)
+  /// gated by a `user_property` rule so eligibility evaluation has
+  /// something non-trivial to demo.
+  static const productResearch = 'psv_demo_product_research';
+
+  static const all = [npsAfterCheckout, csatSupport, productResearch];
+
+  static const titles = <String, String>{
+    npsAfterCheckout: 'Post-checkout NPS',
+    csatSupport: 'Support CSAT',
+    productResearch: 'Product research (gated)',
+  };
+
+  static const descriptions = <String, String>{
+    npsAfterCheckout:
+        'Score 0–10. Detractors get a "what went wrong" follow-up via branching.',
+    csatSupport:
+        'Single 1–5 star rating. Smallest possible survey — good for smoke tests.',
+    productResearch:
+        'Multi-question. Targeting rule requires user_property "plan" = "pro".',
+  };
+}
+
 /// Typed accessor wrappers — centralized here so every screen that
 /// reads the demo keys stays in sync if the shapes ever change.
 class DemoPricingTier {

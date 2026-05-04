@@ -6,6 +6,7 @@ import 'animation_stress_test_screen.dart';
 import 'crash_gallery_screen.dart';
 import 'dashboard_screen.dart';
 import 'flags_lab_screen.dart';
+import 'pulse_lab_screen.dart';
 import 'settings_screen.dart';
 import 'profile_screen.dart';
 
@@ -72,6 +73,13 @@ class _EventTesterScreenState extends State<EventTesterScreen> {
             onPressed: () => Navigator.of(
               context,
             ).push(MaterialPageRoute(builder: (_) => const FlagsLabScreen())),
+          ),
+          IconButton(
+            icon: const Icon(Icons.feedback_outlined),
+            tooltip: 'Pulse Lab',
+            onPressed: () => Navigator.of(
+              context,
+            ).push(MaterialPageRoute(builder: (_) => const PulseLabScreen())),
           ),
           IconButton(
             icon: const Icon(Icons.settings_rounded),
@@ -265,6 +273,12 @@ class _EventTesterScreenState extends State<EventTesterScreen> {
           icon: Icons.bug_report_rounded,
           color: Colors.pink,
           screen: const CrashGalleryScreen(),
+        ),
+        _NavCard(
+          label: 'Pulse Lab',
+          icon: Icons.feedback_outlined,
+          color: Colors.cyan,
+          screen: const PulseLabScreen(),
         ),
       ],
     );

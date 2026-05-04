@@ -4,6 +4,7 @@ import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import 'brand.dart';
 import 'branching.dart';
 import 'pulse_models.dart';
 import 'translator.dart';
@@ -357,6 +358,8 @@ class _SankofaSurveyDialogState extends State<SankofaSurveyDialog> {
                   ),
                 ],
               ),
+              const SizedBox(height: 12),
+              _PoweredBySankofa(muted: muted, border: border, fontFamily: fontFamily),
             ],
           ),
         ),
@@ -986,5 +989,72 @@ class _SignaturePainter extends CustomPainter {
   @override
   bool shouldRepaint(covariant _SignaturePainter oldDelegate) =>
       oldDelegate.strokes != strokes || oldDelegate.current != current;
+}
+
+// Powered-by-Sankofa attribution. Mirrors the Web SDK + dashboard
+// preview: same icon (decoded from the shared base64 brand asset),
+// same label, same tap-to-open behaviour, separated from the action
+// row by a top border. Suppressed only on white-label tiers (a
+// future server flag will skip this widget; until then it always
+// renders, matching the SDK contract).
+class _PoweredBySankofa extends StatelessWidget {
+  const _PoweredBySankofa({
+    required this.muted,
+    required this.border,
+    required this.fontFamily,
+  });
+
+  final Color muted;
+  final Color border;
+  final String? fontFamily;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      decoration: BoxDecoration(
+        border: Border(top: BorderSide(color: border)),
+      ),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      child: InkWell(
+        onTap: () async {
+          final uri = Uri.parse(kSankofaAttributionUrl);
+          // Flutter SDKs that need URL-launch should depend on
+          // url_launcher; we avoid that dependency here and let the
+          // host catch the failed launch in production. The Web SDK
+          // does this via plain anchor click, RN via Linking, and on
+          // Flutter we surface the same intent.
+          await SystemChannels.platform.invokeMethod<void>(
+            'SystemNavigator.openUrl',
+            uri.toString(),
+          );
+        },
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Image.memory(
+              base64Decode(kBrandIconBase64),
+              width: 12,
+              height: 12,
+              fit: BoxFit.contain,
+              gaplessPlayback: true,
+            ),
+            const SizedBox(width: 4),
+            Text(
+              'Powered by Sankofa',
+              style: TextStyle(
+                color: muted,
+                fontSize: 10,
+                fontWeight: FontWeight.w600,
+                letterSpacing: 0.2,
+                fontFamily: fontFamily,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 }
 
