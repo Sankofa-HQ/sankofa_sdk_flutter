@@ -14,6 +14,7 @@ import 'dart:typed_data';
 
 class PulseRuleKind {
   static const url = 'url';
+  static const screen = 'screen';
   static const event = 'event';
   static const userProperty = 'user_property';
   static const cohort = 'cohort';
@@ -46,6 +47,9 @@ class PulseTargetingRule {
   // url
   final String? urlMatch;
   final String? urlValue;
+  // screen — same shape as url, applied to native screen names.
+  final String? screenMatch;
+  final String? screenName;
   // event
   final String? eventName;
   final int? eventMinCount;
@@ -70,6 +74,8 @@ class PulseTargetingRule {
     required this.kind,
     this.urlMatch,
     this.urlValue,
+    this.screenMatch,
+    this.screenName,
     this.eventName,
     this.eventMinCount,
     this.eventWindowDays,
@@ -90,6 +96,8 @@ class PulseTargetingRule {
         kind: json['kind'] as String? ?? '',
         urlMatch: json['url_match'] as String?,
         urlValue: json['url_value'] as String?,
+        screenMatch: json['screen_match'] as String?,
+        screenName: json['screen_name'] as String?,
         eventName: json['event_name'] as String?,
         eventMinCount: (json['event_min_count'] as num?)?.toInt(),
         eventWindowDays: (json['event_window_days'] as num?)?.toInt(),
@@ -112,6 +120,14 @@ class PulseEligibilityContext {
   final String surveyId;
   final String respondentExternalId;
   final String? pageUrl;
+
+  /// Native screen / route name. Sourced from
+  /// `SankofaNavigatorObserver` so the most-recently-pushed route's
+  /// name flows here. Empty before any navigation event fires —
+  /// KindScreen rules will not match until the SDK has observed at
+  /// least one screen.
+  final String? screenName;
+
   final Map<String, int>? recentEvents;
   final Map<String, Object?>? userProperties;
   final Map<String, bool>? cohorts;
@@ -122,6 +138,7 @@ class PulseEligibilityContext {
     required this.surveyId,
     required this.respondentExternalId,
     this.pageUrl,
+    this.screenName,
     this.recentEvents,
     this.userProperties,
     this.cohorts,
@@ -160,6 +177,8 @@ PulseDecision evaluatePulseTargeting(
   switch (rule.kind) {
     case PulseRuleKind.url:
       return _evalUrl(rule, ctx);
+    case PulseRuleKind.screen:
+      return _evalScreen(rule, ctx);
     case PulseRuleKind.event:
       return _evalEvent(rule, ctx);
     case PulseRuleKind.userProperty:
@@ -210,6 +229,42 @@ PulseDecision evaluatePulseTargeting(
           : (false, 'url does not match regex');
   }
   return (false, 'url_match unknown');
+}
+
+// ── Screen ───────────────────────────────────────────────────────────
+
+(bool, String) _evalScreen(
+  PulseTargetingRule rule,
+  PulseEligibilityContext ctx,
+) {
+  final screen = ctx.screenName ?? '';
+  final value = rule.screenName ?? '';
+  if (screen.isEmpty) return (false, 'screen unknown');
+  switch (rule.screenMatch) {
+    case PulseMatchOp.equals:
+      return screen == value
+          ? (true, '')
+          : (false, 'screen not equal to target');
+    case PulseMatchOp.contains:
+      return screen.contains(value)
+          ? (true, '')
+          : (false, 'screen does not contain target');
+    case PulseMatchOp.prefix:
+      return screen.startsWith(value)
+          ? (true, '')
+          : (false, 'screen does not start with target');
+    case PulseMatchOp.regex:
+      RegExp re;
+      try {
+        re = RegExp(value);
+      } catch (_) {
+        return (false, 'screen regex did not compile');
+      }
+      return re.hasMatch(screen)
+          ? (true, '')
+          : (false, 'screen does not match regex');
+  }
+  return (false, 'screen_match unknown');
 }
 
 // ── Event ────────────────────────────────────────────────────────────
