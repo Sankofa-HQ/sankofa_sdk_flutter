@@ -47,9 +47,10 @@ class PulseTargetingRule {
   // url
   final String? urlMatch;
   final String? urlValue;
-  // screen — same shape as url, applied to native screen names.
+  // screen — same comparator set as url, OR-matched against the
+  // native screen / route name. screenNames is the target set.
   final String? screenMatch;
-  final String? screenName;
+  final List<String>? screenNames;
   // event
   final String? eventName;
   final int? eventMinCount;
@@ -75,7 +76,7 @@ class PulseTargetingRule {
     this.urlMatch,
     this.urlValue,
     this.screenMatch,
-    this.screenName,
+    this.screenNames,
     this.eventName,
     this.eventMinCount,
     this.eventWindowDays,
@@ -97,7 +98,9 @@ class PulseTargetingRule {
         urlMatch: json['url_match'] as String?,
         urlValue: json['url_value'] as String?,
         screenMatch: json['screen_match'] as String?,
-        screenName: json['screen_name'] as String?,
+        screenNames: (json['screen_names'] as List?)
+            ?.whereType<String>()
+            .toList(growable: false),
         eventName: json['event_name'] as String?,
         eventMinCount: (json['event_min_count'] as num?)?.toInt(),
         eventWindowDays: (json['event_window_days'] as num?)?.toInt(),
@@ -238,33 +241,33 @@ PulseDecision evaluatePulseTargeting(
   PulseEligibilityContext ctx,
 ) {
   final screen = ctx.screenName ?? '';
-  final value = rule.screenName ?? '';
   if (screen.isEmpty) return (false, 'screen unknown');
-  switch (rule.screenMatch) {
-    case PulseMatchOp.equals:
-      return screen == value
-          ? (true, '')
-          : (false, 'screen not equal to target');
-    case PulseMatchOp.contains:
-      return screen.contains(value)
-          ? (true, '')
-          : (false, 'screen does not contain target');
-    case PulseMatchOp.prefix:
-      return screen.startsWith(value)
-          ? (true, '')
-          : (false, 'screen does not start with target');
-    case PulseMatchOp.regex:
-      RegExp re;
-      try {
-        re = RegExp(value);
-      } catch (_) {
-        return (false, 'screen regex did not compile');
-      }
-      return re.hasMatch(screen)
-          ? (true, '')
-          : (false, 'screen does not match regex');
+  final targets = (rule.screenNames ?? const <String>[])
+      .where((t) => t.isNotEmpty)
+      .toList(growable: false);
+  if (targets.isEmpty) return (false, 'screen rule has no targets');
+  for (final target in targets) {
+    if (_matchScreen(screen, target, rule.screenMatch)) return (true, '');
   }
-  return (false, 'screen_match unknown');
+  return (false, 'screen does not match any target');
+}
+
+bool _matchScreen(String screen, String target, String? op) {
+  switch (op) {
+    case PulseMatchOp.equals:
+      return screen == target;
+    case PulseMatchOp.contains:
+      return screen.contains(target);
+    case PulseMatchOp.prefix:
+      return screen.startsWith(target);
+    case PulseMatchOp.regex:
+      try {
+        return RegExp(target).hasMatch(screen);
+      } catch (_) {
+        return false;
+      }
+  }
+  return false;
 }
 
 // ── Event ────────────────────────────────────────────────────────────
