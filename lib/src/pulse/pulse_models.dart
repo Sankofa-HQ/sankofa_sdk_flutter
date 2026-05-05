@@ -140,6 +140,48 @@ class PulseSurvey {
   }
 }
 
+/// Lightweight projection returned by GET /api/pulse/surveys.
+/// Used for survey discovery from the SDK side — pairs with each
+/// survey's targeting rules so callers can run local eligibility
+/// evaluation without a per-survey bundle fetch.
+class PulseSurveySummary {
+  final String id;
+  final String name;
+  final String? description;
+  final String kind;
+  final String status;
+  final String? slug;
+  final List<PulseTargetingRule> targetingRules;
+
+  const PulseSurveySummary({
+    required this.id,
+    required this.name,
+    this.description,
+    required this.kind,
+    required this.status,
+    this.slug,
+    this.targetingRules = const [],
+  });
+
+  factory PulseSurveySummary.fromJson(Map<String, dynamic> json) {
+    final rawRules = json['targeting_rules'] as List<dynamic>?;
+    return PulseSurveySummary(
+      id: json['id'] as String? ?? '',
+      name: json['name'] as String? ?? '',
+      description: json['description'] as String?,
+      kind: json['kind'] as String? ?? '',
+      status: json['status'] as String? ?? '',
+      slug: json['slug'] as String?,
+      targetingRules: rawRules == null
+          ? const []
+          : rawRules
+              .whereType<Map<String, dynamic>>()
+              .map(PulseTargetingRule.fromJson)
+              .toList(),
+    );
+  }
+}
+
 class PulseHandshakeResponse {
   final List<PulseSurvey> surveys;
 

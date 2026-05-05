@@ -48,6 +48,31 @@ class PulseClient {
     return PulseHandshakeResponse.fromJson(decoded);
   }
 
+  /// List every published survey the API key's project owns. Each
+  /// summary carries the targeting rules so callers can run local
+  /// eligibility evaluation without per-survey round-trips. Powers
+  /// `getActiveMatchingSurveys()`. Returns an empty list on 404 so
+  /// older engines without this endpoint don't break the SDK.
+  Future<List<PulseSurveySummary>> listSurveys() async {
+    final uri = Uri.parse('$_base/api/pulse/surveys');
+    final res = await _http.get(uri, headers: _headers()).timeout(timeout);
+    if (res.statusCode == 404) return const [];
+    if (res.statusCode < 200 || res.statusCode >= 300) {
+      throw PulseHttpException(res.statusCode, res.body);
+    }
+    if (res.body.isEmpty) return const [];
+    final decoded = jsonDecode(res.body);
+    final raw = decoded is Map<String, dynamic>
+        ? (decoded['surveys'] as List?) ?? const []
+        : decoded is List
+            ? decoded
+            : const [];
+    return raw
+        .whereType<Map<String, dynamic>>()
+        .map(PulseSurveySummary.fromJson)
+        .toList(growable: false);
+  }
+
   /// Load the full survey bundle (survey row + targeting rules) for
   /// one survey. The SDK calls this right before presenting so it
   /// can run the targeting evaluator locally and skip the show if

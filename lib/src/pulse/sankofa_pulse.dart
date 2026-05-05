@@ -41,6 +41,11 @@ class SankofaPulse implements SankofaModule {
   static final SankofaPulse instance = SankofaPulse._();
 
   PulseClient? _client;
+  /// Targeting rules keyed by survey id, populated alongside
+  /// [_cached] on each `_refreshSurveys()`. Lets
+  /// [activeMatchingSurveys] run the eligibility evaluator without
+  /// fetching a full bundle for every cached survey.
+  Map<String, List<PulseTargetingRule>> _targetingRules = const {};
   PulseQueue? _queue;
   bool _registered = false;
   bool _enabled = true;
@@ -119,18 +124,37 @@ class SankofaPulse implements SankofaModule {
 
   // ── Public reads ──────────────────────────────────────────────────
 
-  /// Returns the surveys eligible for the current user/session.
-  /// v1 is "every published survey from the handshake"; targeting
-  /// evaluation lands in a future release.
+  /// Returns the surveys whose targeting rules pass for the current
+  /// respondent. Sourced from `/api/pulse/surveys` (one call per
+  /// refresh) plus the local targeting evaluator — same evaluator
+  /// the Web/RN/iOS/Android SDKs use, and a byte-for-byte mirror of
+  /// the Go server-side implementation.
   Future<List<PulseSurvey>> activeMatchingSurveys() async {
-    if (_cached.isNotEmpty) return _cached;
-    final pending = _refreshFuture;
-    if (pending != null) {
-      await pending;
-    } else {
-      await _refreshSurveys();
+    if (_cached.isEmpty) {
+      final pending = _refreshFuture;
+      if (pending != null) {
+        await pending;
+      } else {
+        await _refreshSurveys();
+      }
     }
-    return _cached;
+    if (_cached.isEmpty) return const [];
+    final out = <PulseSurvey>[];
+    for (final s in _cached) {
+      final rules = _targetingRules[s.id] ?? const <PulseTargetingRule>[];
+      if (rules.isEmpty) {
+        out.add(s);
+        continue;
+      }
+      final decision = _evaluateLocally(
+        surveyId: s.id,
+        rules: rules,
+        properties: const {},
+        flags: const {},
+      );
+      if (decision.eligible) out.add(s);
+    }
+    return out;
   }
 
   /// Forces a refresh of the cached survey list from the server.
@@ -514,13 +538,36 @@ class SankofaPulse implements SankofaModule {
     if (pending != null) return pending;
     final fut = () async {
       try {
-        final resp = await c.handshake();
-        _cached = resp.surveys;
+        // SDK-readable list endpoint — returns the lightweight
+        // summary + targeting rules per survey so the local
+        // eligibility evaluator has everything it needs without a
+        // per-survey bundle round-trip. Falls through to the legacy
+        // `/api/pulse/handshake` endpoint on older engines that
+        // 404 the new path; either response shape produces a
+        // populated _cached.
+        final summaries = await c.listSurveys();
+        if (summaries.isNotEmpty) {
+          _cached = summaries
+              .map((s) => PulseSurvey(
+                    id: s.id,
+                    kind: s.kind,
+                    name: s.name,
+                    description: s.description,
+                  ))
+              .toList(growable: false);
+          _targetingRules = {
+            for (final s in summaries) s.id: s.targetingRules,
+          };
+        } else {
+          final resp = await c.handshake();
+          _cached = resp.surveys;
+          _targetingRules = const {};
+        }
         final q = _queue;
         if (q != null) await q.drain((p) => c.submit(p));
       } catch (e) {
         if (kDebugMode) {
-          debugPrint('[Sankofa] pulse handshake failed: $e');
+          debugPrint('[Sankofa] pulse refresh failed: $e');
         }
       } finally {
         _refreshFuture = null;
