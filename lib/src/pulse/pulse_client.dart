@@ -1,8 +1,45 @@
 import 'dart:convert';
 
 import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'pulse_models.dart';
+
+/// Cached survey list — written to SharedPreferences on every full
+/// fetch so the SDK can serve subsequent calls from disk and 304
+/// the network when the server hasn't changed anything. Same
+/// server-load posture as the Web / RN SDKs.
+class _CachedSurveysList {
+  final String etag;
+  final int fetchedAtMs;
+  final List<PulseSurveySummary> surveys;
+  const _CachedSurveysList({
+    required this.etag,
+    required this.fetchedAtMs,
+    required this.surveys,
+  });
+
+  Map<String, dynamic> toJson() => {
+        'etag': etag,
+        'fetched_at_ms': fetchedAtMs,
+        'surveys': surveys.map((s) => s.toJson()).toList(),
+      };
+
+  factory _CachedSurveysList.fromJson(Map<String, dynamic> json) {
+    final raw = json['surveys'] as List<dynamic>? ?? const [];
+    return _CachedSurveysList(
+      etag: json['etag'] as String? ?? '',
+      fetchedAtMs: (json['fetched_at_ms'] as num?)?.toInt() ?? 0,
+      surveys: raw
+          .whereType<Map<String, dynamic>>()
+          .map(PulseSurveySummary.fromJson)
+          .toList(),
+    );
+  }
+}
+
+const _surveysCachePrefix = 'sankofa.pulse.surveys.';
+const _defaultListTtlMs = 5 * 60 * 1000;
 
 /// Pulse REST client. Six endpoints:
 ///
@@ -48,29 +85,107 @@ class PulseClient {
     return PulseHandshakeResponse.fromJson(decoded);
   }
 
-  /// List every published survey the API key's project owns. Each
-  /// summary carries the targeting rules so callers can run local
-  /// eligibility evaluation without per-survey round-trips. Powers
-  /// `getActiveMatchingSurveys()`. Returns an empty list on 404 so
+  /// List every published survey the API key's project owns.
+  /// Cached in SharedPreferences with ETag + TTL — reads after the
+  /// first fetch are instant, and revalidations short-circuit to a
+  /// 304 + zero body when the server hasn't changed anything. Same
+  /// posture as the Web / RN SDKs: one full fetch per device per
+  /// few minutes, 304 the rest. Returns an empty list on 404 so
   /// older engines without this endpoint don't break the SDK.
-  Future<List<PulseSurveySummary>> listSurveys() async {
-    final uri = Uri.parse('$_base/api/pulse/surveys');
-    final res = await _http.get(uri, headers: _headers()).timeout(timeout);
-    if (res.statusCode == 404) return const [];
-    if (res.statusCode < 200 || res.statusCode >= 300) {
-      throw PulseHttpException(res.statusCode, res.body);
+  Future<List<PulseSurveySummary>> listSurveys({
+    bool forceRefresh = false,
+    Duration? ttl,
+  }) async {
+    final ttlMs = (ttl ?? const Duration(milliseconds: _defaultListTtlMs))
+        .inMilliseconds;
+    final cacheKey = '$_surveysCachePrefix$_base|$apiKey';
+
+    final prefs = await SharedPreferences.getInstance();
+    final cached = _readCache(prefs, cacheKey);
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (!forceRefresh &&
+        cached != null &&
+        now - cached.fetchedAtMs < ttlMs) {
+      return cached.surveys;
     }
-    if (res.body.isEmpty) return const [];
-    final decoded = jsonDecode(res.body);
-    final raw = decoded is Map<String, dynamic>
-        ? (decoded['surveys'] as List?) ?? const []
-        : decoded is List
-            ? decoded
-            : const [];
-    return raw
-        .whereType<Map<String, dynamic>>()
-        .map(PulseSurveySummary.fromJson)
-        .toList(growable: false);
+
+    final headers = <String, String>{..._headers()};
+    if (cached != null && cached.etag.isNotEmpty) {
+      headers['If-None-Match'] = cached.etag;
+    }
+
+    final uri = Uri.parse('$_base/api/pulse/surveys');
+    try {
+      final res = await _http.get(uri, headers: headers).timeout(timeout);
+      if (res.statusCode == 304 && cached != null) {
+        await _writeCache(
+          prefs,
+          cacheKey,
+          _CachedSurveysList(
+            etag: cached.etag,
+            fetchedAtMs: now,
+            surveys: cached.surveys,
+          ),
+        );
+        return cached.surveys;
+      }
+      if (res.statusCode == 404) return const [];
+      if (res.statusCode < 200 || res.statusCode >= 300) {
+        throw PulseHttpException(res.statusCode, res.body);
+      }
+      final etag = res.headers['etag'] ?? '';
+      if (res.body.isEmpty) return const [];
+      final decoded = jsonDecode(res.body);
+      final raw = decoded is Map<String, dynamic>
+          ? (decoded['surveys'] as List?) ?? const []
+          : decoded is List
+              ? decoded
+              : const [];
+      final surveys = raw
+          .whereType<Map<String, dynamic>>()
+          .map(PulseSurveySummary.fromJson)
+          .toList(growable: false);
+      await _writeCache(
+        prefs,
+        cacheKey,
+        _CachedSurveysList(
+          etag: etag,
+          fetchedAtMs: now,
+          surveys: surveys,
+        ),
+      );
+      return surveys;
+    } catch (e) {
+      // Network failed but we have a stale cache — return it rather
+      // than blocking the host. Better stale surveys for one tick
+      // than a broken modal during a flaky moment.
+      if (cached != null) return cached.surveys;
+      rethrow;
+    }
+  }
+
+  _CachedSurveysList? _readCache(SharedPreferences prefs, String key) {
+    try {
+      final raw = prefs.getString(key);
+      if (raw == null || raw.isEmpty) return null;
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map<String, dynamic>) return null;
+      return _CachedSurveysList.fromJson(decoded);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> _writeCache(
+    SharedPreferences prefs,
+    String key,
+    _CachedSurveysList value,
+  ) async {
+    try {
+      await prefs.setString(key, jsonEncode(value.toJson()));
+    } catch (_) {
+      /* swallow — fall back to per-call fetch */
+    }
   }
 
   /// Load the full survey bundle (survey row + targeting rules) for

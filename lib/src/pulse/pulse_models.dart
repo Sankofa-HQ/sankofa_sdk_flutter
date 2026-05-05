@@ -152,6 +152,12 @@ class PulseSurveySummary {
   final String status;
   final String? slug;
   final List<PulseTargetingRule> targetingRules;
+  /// Display behaviour fields — published from the dashboard,
+  /// evaluated by the SDK. autoShow defaults to true,
+  /// displayCooldownSeconds defaults to 7 days, displayDelayMs to 0.
+  final bool autoShow;
+  final int displayCooldownSeconds;
+  final int displayDelayMs;
 
   const PulseSurveySummary({
     required this.id,
@@ -161,6 +167,9 @@ class PulseSurveySummary {
     required this.status,
     this.slug,
     this.targetingRules = const [],
+    this.autoShow = true,
+    this.displayCooldownSeconds = 7 * 24 * 60 * 60,
+    this.displayDelayMs = 0,
   });
 
   factory PulseSurveySummary.fromJson(Map<String, dynamic> json) {
@@ -178,8 +187,51 @@ class PulseSurveySummary {
               .whereType<Map<String, dynamic>>()
               .map(PulseTargetingRule.fromJson)
               .toList(),
+      autoShow: json['auto_show'] as bool? ?? true,
+      displayCooldownSeconds:
+          (json['display_cooldown_seconds'] as num?)?.toInt() ??
+              7 * 24 * 60 * 60,
+      displayDelayMs: (json['display_delay_ms'] as num?)?.toInt() ?? 0,
     );
   }
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'name': name,
+        if (description != null) 'description': description,
+        'kind': kind,
+        'status': status,
+        if (slug != null) 'slug': slug,
+        'targeting_rules': targetingRules.map((r) {
+          // Round-trip via fromJson's accepted shape — same wire keys.
+          final m = <String, dynamic>{'kind': r.kind};
+          if (r.urlMatch != null) m['url_match'] = r.urlMatch;
+          if (r.urlValue != null) m['url_value'] = r.urlValue;
+          if (r.screenMatch != null) m['screen_match'] = r.screenMatch;
+          if (r.screenNames != null) m['screen_names'] = r.screenNames;
+          if (r.eventName != null) m['event_name'] = r.eventName;
+          if (r.eventMinCount != null) m['event_min_count'] = r.eventMinCount;
+          if (r.eventWindowDays != null) {
+            m['event_window_days'] = r.eventWindowDays;
+          }
+          if (r.propertyKey != null) m['property_key'] = r.propertyKey;
+          if (r.propertyOp != null) m['property_op'] = r.propertyOp;
+          if (r.propertyValue != null) m['property_value'] = r.propertyValue;
+          if (r.cohortId != null) m['cohort_id'] = r.cohortId;
+          if (r.samplingRate != null) m['sampling_rate'] = r.samplingRate;
+          if (r.frequencyScope != null) m['frequency_scope'] = r.frequencyScope;
+          if (r.frequencyMax != null) m['frequency_max'] = r.frequencyMax;
+          if (r.frequencyWindowDays != null) {
+            m['frequency_window_days'] = r.frequencyWindowDays;
+          }
+          if (r.flagKey != null) m['flag_key'] = r.flagKey;
+          if (r.flagValue != null) m['flag_value'] = r.flagValue;
+          return m;
+        }).toList(),
+        'auto_show': autoShow,
+        'display_cooldown_seconds': displayCooldownSeconds,
+        'display_delay_ms': displayDelayMs,
+      };
 }
 
 class PulseHandshakeResponse {
