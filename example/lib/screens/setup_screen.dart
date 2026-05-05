@@ -24,7 +24,7 @@ class _SetupScreenState extends State<SetupScreen>
     text: _getDefaultEngineUrl(),
   );
   final _apiKeyController = TextEditingController(
-    text: 'sk_test_b25f965d194d55bd071fb23921401e7c',
+    // text: 'sk_test_b25f965d194d55bd071fb23921401e7c',
   );
 
   bool _connecting = false;
