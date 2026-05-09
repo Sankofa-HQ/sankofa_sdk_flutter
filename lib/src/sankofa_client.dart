@@ -20,6 +20,8 @@ import 'sankofa_track.dart';
 import 'replay/sankofa_replay.dart';
 import 'replay/sankofa_replay_config.dart';
 import 'core/module_registry.dart';
+import 'catch/catch_types.dart';
+import 'catch/sankofa_catch.dart';
 import 'utils/logger.dart';
 import 'utils/uri_helper.dart';
 
@@ -30,6 +32,89 @@ class Sankofa {
   /// The singleton instance of the Sankofa client.
   static final Sankofa instance = Sankofa._internal();
   Sankofa._internal();
+
+  // ───────────────────────────────────────────────────────────────────
+  // Static error-tracking helpers — Crashlytics + Sentry style
+  // ───────────────────────────────────────────────────────────────────
+  //
+  // These delegate to the active [SankofaCatch] singleton (auto-
+  // constructed by `Sankofa.instance.init(enableCatch: true)`).  Calls
+  // before init runs degrade to no-ops so host code never has to guard.
+  //
+  // Why they're static: this is the API surface the host should reach
+  // for from anywhere — `Sankofa.captureException(err)` from a deeply
+  // nested screen, no instance plumbing.  The full instance API
+  // (`SankofaCatch.instance!.foo`) stays available for advanced users
+  // who need it.
+
+  /// Record a handled exception with an optional stack trace + options.
+  /// Uncaught errors are captured automatically — only call this when
+  /// you caught an error yourself but still want it reported (e.g.
+  /// inside a `try/catch` that recovered gracefully but should log).
+  /// Returns the event id (empty string when Catch isn't initialized).
+  static String captureException(
+    Object error, [
+    Object? stackTrace,
+    CatchCaptureOptions? options,
+  ]) {
+    return SankofaCatch.instance?.captureException(error, stackTrace, options) ?? '';
+  }
+
+  /// Record a free-form message as a standalone Catch event.  Use this
+  /// for "interesting non-error" reports where you want a billable
+  /// event (e.g. "payment retry exhausted").  For pure "log this
+  /// breadcrumb" use [log] instead — it's free.
+  static String captureMessage(String message, [CatchCaptureOptions? options]) {
+    return SankofaCatch.instance?.captureMessage(message, options) ?? '';
+  }
+
+  /// Crashlytics-style structured log.  Adds a breadcrumb that rides
+  /// on the next captured event.  Free, doesn't bill — use liberally
+  /// to narrate user activity ("entered checkout", "tapped pay").
+  static void log(String message, {String? category}) {
+    SankofaCatch.instance?.log(message, category: category);
+  }
+
+  /// Attach a single tag to every subsequent event.  Sticky — call
+  /// again with a new value to update.  For per-event scoping (Sentry-
+  /// style `withScope`) wait for Phase B.
+  static void setTag(String key, String value) {
+    SankofaCatch.instance?.setTags({key: value});
+  }
+
+  /// Attach multiple tags at once.  Sticky.
+  static void setTags(Map<String, String> tags) {
+    SankofaCatch.instance?.setTags(tags);
+  }
+
+  /// Attach an arbitrary contextual value to every subsequent event.
+  /// Sticky.  Use for non-string context (numbers, lists, maps) that
+  /// doesn't fit the tag shape.
+  static void setExtra(String key, dynamic value) {
+    SankofaCatch.instance?.setExtra(key, value);
+  }
+
+  /// Identify the user.  Sticky — pass `null` to clear (e.g. on logout).
+  static void setUser(CatchUserContext? user) {
+    SankofaCatch.instance?.setUser(user);
+  }
+
+  /// Push a custom breadcrumb.  Auto-captured ones (HTTP, navigation,
+  /// console.error etc.) already flow without this; reach for it when
+  /// you want a structured marker like `addBreadcrumb(category: 'auth',
+  /// message: 'token refreshed')`.
+  static void addBreadcrumb(CatchBreadcrumb crumb) {
+    SankofaCatch.instance?.addBreadcrumb(crumb);
+  }
+
+  /// Force a flush of any pending Catch events.  No-op when Catch
+  /// isn't initialized.  Pair with [Sankofa.flush] (the analytics
+  /// flush) when you want to evacuate everything before backgrounding.
+  static Future<void> flushCatch() async {
+    final c = SankofaCatch.instance;
+    if (c == null) return;
+    await c.flush();
+  }
 
   late SankofaLogger _logger;
   late SankofaIdentity _identity;
@@ -103,6 +188,20 @@ class Sankofa {
     bool enableSessionReplay = true,
     SankofaReplayMode replayMode = SankofaReplayMode.screenshot,
     int replayFps = 1,
+    // ── Catch (error tracking) ────────────────────────────────────
+    //
+    // Defaults match the "Crashlytics on by default" expectation —
+    // hosts that want it OFF (a billing-tier downgrade, a custom
+    // pipeline) pass `enableCatch: false`.  When ON, we auto-construct
+    // a [SankofaCatch] singleton with handlers wired so EVERY uncaught
+    // Dart error, async error, and isolate error gets reported with no
+    // further setup.  Sentry-style flag/config snapshots are auto-
+    // discovered from any registered [SankofaSwitch] / [SankofaConfig]
+    // — no `readFlagSnapshot` boilerplate.
+    bool enableCatch = true,
+    String catchEnvironment = 'live',
+    String? release,
+    String? appVersion,
   }) async {
     if (_isInitialized) await dispose();
 
@@ -114,6 +213,23 @@ class Sankofa {
     // Traffic Cop: flip core-ready so modules registered AFTER this
     // point don't emit the "registered before init()" warning.
     SankofaModuleRegistry.instance.markCoreInitialized();
+
+    // ── Catch (error + crash tracking) ────────────────────────────
+    //
+    // Auto-construct the SankofaCatch singleton so the host doesn't
+    // have to.  Idempotent — if the host already constructed one
+    // BEFORE init() (the legacy boilerplate path), the `_instance ??=`
+    // guard inside SankofaCatch keeps that instance and we skip.
+    // FlutterError.onError + PlatformDispatcher.onError + isolate
+    // listeners install immediately so errors that happen during the
+    // remainder of init() are still captured.
+    if (enableCatch && SankofaCatch.instance == null) {
+      SankofaCatch(
+        environment: catchEnvironment,
+        release: release,
+        appVersion: appVersion,
+      );
+    }
 
     final v1BaseUri = UriHelper.resolveV1BaseUri(endpoint);
     final trackUri = UriHelper.resolveTrackUri(endpoint);

@@ -81,10 +81,13 @@ class _SetupScreenState extends State<SetupScreen>
       // few seconds until the next refresh.
       sankofaSwitch();
       sankofaConfig();
-      // Catch must be instantiated BEFORE init() too so the Traffic
-      // Cop knows to route the catch handshake payload to it —
-      // matches how Switch + Config register themselves above.
-      sankofaCatch();
+      // 🚀 Phase A — Catch is now auto-constructed by `Sankofa.instance.init`
+      // when `enableCatch: true` (the default).  No more manual
+      // `sankofaCatch()` factory call needed for the 90% case.  The
+      // legacy factory in `sankofa_runtime.dart` still works for
+      // power users who want a custom transport / sample rate / etc.
+      // Switch + Config decisions are auto-discovered from the
+      // registry — no `readFlagSnapshot`/`readConfigSnapshot` closures.
 
       await Sankofa.instance.init(
         apiKey: key,
@@ -93,6 +96,12 @@ class _SetupScreenState extends State<SetupScreen>
         trackLifecycleEvents: _trackLifecycleEvents,
         enableSessionReplay: _enableSessionReplay,
         replayMode: _replayMode,
+        // ── Catch (Crashlytics + Sentry merged) ──
+        // Default `enableCatch: true` would auto-construct without
+        // these — passing them explicitly for clarity in the demo.
+        enableCatch: true,
+        catchEnvironment: 'test',
+        release: 'sankofa-example-flutter@0.1.0',
       );
       // Pulse registers AFTER init because it reads apiKey + endpoint
       // at register-time (Switch/Config/Catch all pull lazily on

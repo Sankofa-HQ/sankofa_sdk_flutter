@@ -8,9 +8,9 @@ import 'package:sankofa_flutter/sankofa_flutter.dart';
 import '../sankofa_runtime.dart';
 
 /// Sankofa Catch crash gallery — one realistic Flutter crash class per
-/// button. Every event lands in the dashboard's Catch → Issues list
-/// with the live Switch + Config snapshot attached (see
-/// `sankofaCatch()` in `sankofa_runtime.dart`).
+/// button.  Every event lands in the dashboard's Catch → Issues list
+/// with the live Switch + Config snapshot attached (auto-discovered
+/// from the Module Registry by `Sankofa.instance.init` in Phase A).
 ///
 /// The gallery is organised into three sections mirroring the Web +
 /// Node examples:
@@ -20,9 +20,29 @@ import '../sankofa_runtime.dart';
 ///   3. Manual captures — `captureException` + `captureMessage` with
 ///      fingerprints, tags, extra context, and breadcrumbs
 ///
+/// 🚀 Two API patterns are shown side-by-side so you can pick whichever
+/// fits your codebase:
+///
+///   - **Static helpers (Crashlytics-style)** — call from anywhere with
+///     no instance plumbing.  The 90% case:
+///
+///         Sankofa.log('user clicked checkout');
+///         Sankofa.setUser(const CatchUserContext(id: 'u1'));
+///         Sankofa.captureException(err, stackTrace);
+///
+///   - **Instance API (Sentry-style)** — for advanced use where you
+///     want a custom transport, sample rate, or shutdown lifecycle:
+///
+///         final c = SankofaCatch.instance;
+///         c?.captureException(err, st, CatchCaptureOptions(...));
+///
+/// Both reach the same singleton — pick by ergonomic preference.
+///
 /// Uncaught errors ride the `FlutterError.onError` +
 /// `PlatformDispatcher.instance.onError` hooks the SDK installs — no
-/// try/catch needed for those scenarios.
+/// try/catch needed for those scenarios.  This file's manual capture
+/// scenarios exist BECAUSE the gallery is testing the handled path,
+/// not because production apps need to write code like this.
 class CrashGalleryScreen extends StatefulWidget {
   const CrashGalleryScreen({super.key});
 
@@ -40,17 +60,20 @@ class _CrashGalleryScreenState extends State<CrashGalleryScreen> {
     // Sticky user + tag context — every event below inherits these,
     // matching the Node / Web example conventions so dashboards look
     // consistent across SDKs.
-    sankofaCatch()
-      ..setUser(const CatchUserContext(
-        id: 'usr_demo_42',
-        email: 'demo@sankofa.dev',
-        username: 'demo',
-      ))
-      ..setTags({
-        'surface': 'crash-gallery',
-        'platform': defaultTargetPlatform.name,
-      })
-      ..setExtra('gallery_version', 1);
+    //
+    // 🚀 Phase A: using the static-helper API (`Sankofa.setUser`,
+    // `Sankofa.setTags`) instead of `sankofaCatch().setUser(...)` —
+    // works from anywhere in the app with no instance plumbing.
+    Sankofa.setUser(const CatchUserContext(
+      id: 'usr_demo_42',
+      email: 'demo@sankofa.dev',
+      username: 'demo',
+    ));
+    Sankofa.setTags({
+      'surface': 'crash-gallery',
+      'platform': defaultTargetPlatform.name,
+    });
+    Sankofa.setExtra('gallery_version', 1);
   }
 
   // ── Scenarios ─────────────────────────────────────────────────
@@ -160,6 +183,28 @@ class _CrashGalleryScreenState extends State<CrashGalleryScreen> {
         ),
 
         // ── Manual captures with rich context ──
+        _Scenario(
+          id: 'crashlytics-style-log',
+          title: 'Crashlytics-style log() + manual capture',
+          detail: 'shows the new Sankofa.log() ring-buffer + Sankofa.captureException statics',
+          run: () {
+            // 🚀 Phase A: pure static-helper API.  No `sankofaCatch()`
+            // factory, no `instance` lookup — these calls work from
+            // anywhere in the app and route to the same singleton the
+            // SDK auto-constructed during `Sankofa.instance.init`.
+            Sankofa.log('user opened payment flow', category: 'navigation');
+            Sankofa.log('cart total: 49.00 USD', category: 'commerce');
+            Sankofa.log('tapped pay button', category: 'user-action');
+            try {
+              throw StateError('payment gateway returned no token');
+            } catch (e, st) {
+              // The three Sankofa.log() lines above ride along on this
+              // event's breadcrumb trail — Crashlytics-equivalent
+              // behaviour with one method.
+              Sankofa.captureException(e, st);
+            }
+          },
+        ),
         _Scenario(
           id: 'json-parse',
           title: 'SyntaxError: JSON on HTML',

@@ -11,6 +11,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../core/module_registry.dart';
 import '../sankofa_client.dart';
+import '../switch/sankofa_switch.dart';
+import '../config/sankofa_config.dart';
 import 'catch_stack_parser.dart';
 import 'catch_types.dart';
 
@@ -37,10 +39,26 @@ class SankofaCatch implements SankofaModule {
   static const Duration _flushInterval = Duration(seconds: 5);
   static const int _maxStorageBytes = 512 * 1024;
 
+  /// Singleton accessor for the active Catch instance.  Set the first
+  /// time [SankofaCatch] is constructed (typically during
+  /// `Sankofa.instance.init(catch: true)`).  The static helpers on the
+  /// public [Sankofa] class — `Sankofa.captureException`, `Sankofa.log`,
+  /// etc. — read this so host code never needs to thread an instance
+  /// reference through every screen.  Returns null when Catch was
+  /// disabled at init or `init()` hasn't run yet — the helpers all
+  /// degrade to no-ops in that case.
+  static SankofaCatch? _instance;
+  static SankofaCatch? get instance => _instance;
+
   final String environment;
   final String? release;
   final String? appVersion;
+  /// When non-null, called at every capture to read the active feature-
+  /// flag decisions.  When null (the default after Phase A), Catch
+  /// auto-discovers the registered [SankofaSwitch] from the module
+  /// registry and reads its decisions directly — no boilerplate.
   final Map<String, String> Function()? readFlagSnapshot;
+  /// Same as [readFlagSnapshot] but for [SankofaConfig] remote values.
   final Map<String, dynamic> Function()? readConfigSnapshot;
 
   final List<CatchEvent> _buffer = [];
@@ -68,12 +86,34 @@ class SankofaCatch implements SankofaModule {
     this.readFlagSnapshot,
     this.readConfigSnapshot,
   }) {
+    // Static singleton lock-in.  First instance wins so multiple
+    // accidental constructions (hot reload, nested test setup) don't
+    // shadow each other.  Hosts that genuinely need a fresh instance
+    // call [shutdown] first to clear it.
+    _instance ??= this;
     SankofaModuleRegistry.instance.register(this);
     unawaited(_hydrate());
     _flushTimer = Timer.periodic(_flushInterval, (_) => unawaited(flush()));
     if (captureUnhandled || captureRejections) {
       _installHandlers(captureUnhandled: captureUnhandled, captureRejections: captureRejections);
     }
+  }
+
+  /// Crashlytics-style structured log.
+  ///
+  /// Adds an entry to the in-memory breadcrumb ring buffer that rides
+  /// on the next captured event — perfect for narrating user activity
+  /// ("entered checkout", "tapped pay") so when a crash fires the
+  /// dashboard shows the lead-up.  Does NOT emit a billable event on
+  /// its own; pair with [captureException] / [captureMessage] when you
+  /// want a standalone event.  Mirrors `FirebaseCrashlytics.log(msg)`.
+  void log(String message, {String? category}) {
+    _breadcrumbs.push(CatchBreadcrumb(
+      type: 'log',
+      category: category ?? 'log',
+      message: message,
+      level: CatchLevel.info,
+    ));
   }
 
   @override
@@ -171,6 +211,11 @@ class SankofaCatch implements SankofaModule {
       PlatformDispatcher.instance.onError = _previousPlatformOnError;
       _handlersInstalled = false;
     }
+    // Clear the singleton only if THIS instance was the one registered
+    // — guards against the "two-instance hot-reload" case where
+    // shutting down a stale instance would otherwise null out the
+    // active one.
+    if (identical(_instance, this)) _instance = null;
   }
 
   // ── Global handler wiring ────────────────────────────────────
@@ -311,8 +356,8 @@ class SankofaCatch implements SankofaModule {
       sdk: {'name': 'sankofa.flutter', 'version': 'flutter-0.1.0'},
       breadcrumbs: _breadcrumbs.snapshot(),
       fingerprint: options?.fingerprint,
-      flagSnapshot: readFlagSnapshot?.call(),
-      configSnapshot: readConfigSnapshot?.call(),
+      flagSnapshot: readFlagSnapshot?.call() ?? _autoFlagSnapshot(),
+      configSnapshot: readConfigSnapshot?.call() ?? _autoConfigSnapshot(),
       traceId: options?.traceId,
       spanId: options?.spanId,
     );
@@ -333,6 +378,38 @@ class SankofaCatch implements SankofaModule {
     if (anon == null || anon.isEmpty) return null;
     if (anon == distinct) return null;
     return anon;
+  }
+
+  /// Auto-discover the active feature-flag decisions by introspecting
+  /// the registered [SankofaSwitch].  Lets every captured event carry
+  /// the live flag state without the host wiring a closure by hand.
+  /// Returns null when no Switch module is registered or when the
+  /// snapshot would be empty.
+  Map<String, String>? _autoFlagSnapshot() {
+    final mod = SankofaModuleRegistry.instance.get(SankofaModuleName.switchModule);
+    if (mod is! SankofaSwitch) return null;
+    final out = <String, String>{};
+    for (final key in mod.getAllKeys()) {
+      final dec = mod.getDecision(key);
+      if (dec == null) continue;
+      out[key] = dec.variant.isNotEmpty ? dec.variant : dec.value.toString();
+    }
+    return out.isEmpty ? null : out;
+  }
+
+  /// Same as [_autoFlagSnapshot] but for the registered [SankofaConfig]
+  /// remote-config module.  Reads the active value for every key the
+  /// host passed into the Config defaults map.
+  Map<String, dynamic>? _autoConfigSnapshot() {
+    final mod = SankofaModuleRegistry.instance.get(SankofaModuleName.configModule);
+    if (mod is! SankofaConfig) return null;
+    final out = <String, dynamic>{};
+    for (final key in mod.getAllKeys()) {
+      final dec = mod.getDecision(key);
+      if (dec == null) continue;
+      out[key] = dec.value;
+    }
+    return out.isEmpty ? null : out;
   }
 
   CatchDeviceContext _buildDeviceContext() {

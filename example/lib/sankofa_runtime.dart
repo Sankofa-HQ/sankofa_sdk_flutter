@@ -21,35 +21,24 @@ SankofaConfig sankofaConfig() {
   return _config ??= SankofaConfig(defaults: demoConfigDefaults());
 }
 
+/// Legacy factory kept for the Crash Gallery's "advanced API" demo path.
+///
+/// 🚀 In Phase A, host apps no longer need this — `Sankofa.instance.init`
+/// auto-constructs SankofaCatch and the static helpers
+/// (`Sankofa.captureException`, `Sankofa.log`, etc.) reach the same
+/// singleton from anywhere in the app.  Switch + Config snapshots are
+/// auto-discovered from the registry, so the read-snapshot closures
+/// that used to live here are gone (dead code).
+///
+/// The factory still works for power users who want a custom transport
+/// or non-default sample rate — it returns the same singleton the
+/// statics route to (idempotent constructor).
 SankofaCatch sankofaCatch() {
-  return _catch ??= SankofaCatch(
-    environment: 'test',
-    release: 'sankofa-example-flutter@0.1.0',
-    readFlagSnapshot: () {
-      // Serialise the current flag decisions so every Catch event
-      // records what the user was seeing at crash time.
-      final out = <String, String>{};
-      final sw = _switch;
-      if (sw == null) return out;
-      for (final key in demoFlagDefaults().keys) {
-        final dec = sw.getDecision(key);
-        if (dec == null) continue;
-        out[key] = dec.variant.isNotEmpty ? dec.variant : dec.value.toString();
-      }
-      return out;
-    },
-    readConfigSnapshot: () {
-      final out = <String, dynamic>{};
-      final cfg = _config;
-      if (cfg == null) return out;
-      for (final key in demoConfigDefaults().keys) {
-        final dec = cfg.getDecision(key);
-        if (dec == null) continue;
-        out[key] = dec.value;
-      }
-      return out;
-    },
-  );
+  return _catch ??= SankofaCatch.instance ??
+      SankofaCatch(
+        environment: 'test',
+        release: 'sankofa-example-flutter@0.1.0',
+      );
 }
 
 /// Register Sankofa Pulse with the host SDK. Unlike Switch/Config/Catch,

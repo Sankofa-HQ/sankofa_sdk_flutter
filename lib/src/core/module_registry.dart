@@ -100,6 +100,14 @@ class SankofaModuleRegistry {
 
   bool has(SankofaModuleName name) => _registered.containsKey(name);
 
+  /// Returns the registered module instance for [name], or null when
+  /// no module of that kind is installed.  Lets sibling modules
+  /// introspect each other at runtime — Catch reads Switch + Config
+  /// here at capture time so the dashboard can show "what flags + config
+  /// values were live when this error fired" without the host wiring
+  /// closures by hand.
+  SankofaModule? get(SankofaModuleName name) => _registered[name];
+
   /// Returns the list of module names the app binary actually ships with.
   /// Analytics is always present (it IS the core).
   List<String> getInstalledModules() {
