@@ -39,8 +39,22 @@ class Sankofa {
   late SankofaLifecycleObserver _lifecycleObserver;
 
   final Map<String, String> _defaultProperties = {};
-  String _currentScreen = 'Unknown';
+
+  // Empty string is the "untagged" sentinel — set to that before the
+  // host tags a screen (via `Sankofa.instance.screen(...)` or the
+  // `SankofaNavigatorObserver`).  The replay recorder skips frame
+  // captures and interaction emits while untagged, so cold-start
+  // gestures never flow into the dashboard's "Unknown" screen bucket.
+  // Mirrors the iOS / Android cold-start guard.
+  String _currentScreen = '';
   String get currentScreen => _currentScreen;
+
+  /// True once the host has tagged a screen (manually via
+  /// [SankofaClient.screen] or automatically via the navigator
+  /// observer).  Used by the replay pipeline to skip frames + events
+  /// captured during the cold-start window before the first screen
+  /// has been resolved.
+  bool get hasTaggedScreen => _currentScreen.isNotEmpty;
 
   SankofaReplayConfig? _replayConfig;
   bool _isInitialized = false;

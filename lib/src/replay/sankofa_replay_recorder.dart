@@ -27,6 +27,12 @@ class SankofaReplayRecorder {
 
   final GlobalKey rootBoundaryKey = GlobalKey();
   final List<Uint8List> _frameBuffer = [];
+  // Per-frame capture timestamps in lockstep with `_frameBuffer`.
+  // Previously every frame in a chunk was tagged with the upload-time
+  // millisecond, which collapsed all frames in a 5-frame chunk to the
+  // same point on the replay player's timeline (visible as a stutter or
+  // a single still frame).  Capture-time stamps fix that.
+  final List<int> _frameTimestamps = [];
   final List<Map<String, dynamic>> _eventBuffer = [];
   DateTime? _chunkStartTime;
   bool _isBlueprintRunning = false;
@@ -91,16 +97,19 @@ class SankofaReplayRecorder {
     if (_mode == SankofaReplayMode.wireframe && _eventBuffer.isEmpty) return;
 
     final frames = List.of(_frameBuffer);
+    final frameTimestamps = List.of(_frameTimestamps);
     final events = List.of(_eventBuffer);
     final startTime = _chunkStartTime;
 
     _frameBuffer.clear();
+    _frameTimestamps.clear();
     _eventBuffer.clear();
     _chunkStartTime = DateTime.now();
 
     await uploader.uploadChunk(
       mode: _mode,
       frames: frames,
+      frameTimestamps: frameTimestamps,
       events: events,
       startTime: startTime,
       deviceContext: {
@@ -142,8 +151,30 @@ class SankofaReplayRecorder {
   double _lastTapX = -9999;
   double _lastTapY = -9999;
 
+  // ── Multi-touch pinch detection (mobile) ─────────────────────────────────
+  // Flutter's [Listener] surfaces every pointer as a separate stream of
+  // Down → Move → Up events keyed by `event.pointer`.  When two pointers
+  // are active simultaneously we emit a single midpoint event with
+  // rrweb type 7 (Pinch / Zoom) per throttle window — replacing the
+  // regular pointer_move path so a pinch never double-records as both
+  // a swipe and a pinch.  Mirrors the iOS / Android pinch detectors.
+  //
+  // `onPointerPanZoomUpdate` covers the desktop / iPad-trackpad pinch
+  // case where the engine surfaces pan-zoom directly.  This map covers
+  // the mobile two-finger case where it does not.
+  final Map<int, Offset> _activePointers = {};
+  int _lastPinchAtMs = 0;
+
   Future<void> _captureFrame() async {
     if (rootBoundaryKey.currentContext == null) return;
+
+    // 🚦 Cold-start screen guard.  The host tags screens explicitly via
+    // `Sankofa.instance.screen(...)` or the `SankofaNavigatorObserver`.
+    // Until that happens, captured frames would all be attributed to an
+    // untagged bucket the dashboard's per-screen heatmap can't match.
+    // Mirrors the iOS / Android `hasTaggedScreen()` guard.
+    if (!Sankofa.instance.hasTaggedScreen) return;
+
     _isCapturingFrame = true;
 
     try {
@@ -158,11 +189,17 @@ class SankofaReplayRecorder {
         await Future.delayed(const Duration(milliseconds: 100));
       }
 
+      // Capture timestamp BEFORE the (potentially slow) toImage / encode
+      // pipeline so the recorded time reflects when the bitmap was
+      // actually rendered.  Both lists stay in lockstep so the uploader
+      // can pair each frame with its capture moment.
+      final captureTimestampMs = DateTime.now().toUtc().millisecondsSinceEpoch;
       final image = await boundary.toImage(pixelRatio: 0.7);
       final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
 
       if (byteData != null) {
         _frameBuffer.add(byteData.buffer.asUint8List());
+        _frameTimestamps.add(captureTimestampMs);
         if (_frameBuffer.length >= 5) flush();
       }
     } catch (e) {
@@ -266,13 +303,40 @@ class SankofaReplayRecorder {
   void recordPointerEvent(String type, PointerEvent event) {
     if (!_isRecording) return;
 
+    // 🚦 Cold-start screen guard — see `_captureFrame` above for the
+    // rationale.  Without this, the very first taps of a session
+    // would attribute to an empty/Unknown screen the dashboard can't
+    // match against any real navigation.
+    if (!Sankofa.instance.hasTaggedScreen) return;
+
     final nowMs = DateTime.now().millisecondsSinceEpoch;
     final x = event.position.dx;
     final yScreen = event.position.dy;
+
+    // 🚫 Drop interactions whose coordinates are NaN/Infinity.  Flutter's
+    // PointerEvent positions are normally finite but custom pointer
+    // sources (third-party gesture frameworks, hot-reload edge cases)
+    // can occasionally produce non-finite values that would otherwise
+    // plot a phantom dot at the heatmap's origin.  Mirrors iOS I5.
+    if (!x.isFinite || !yScreen.isFinite) return;
+
     // 🚀 Absolute Y = Screen position + Current Scroll Offset.
     // Used as the canonical Y for ALL event types so move samples line up
     // with the down/up rows the heatmap renders against.
     final absoluteY = yScreen + _currentScrollY;
+
+    // ── (0) Maintain the active-pointer map for mobile pinch detection ────
+    // Flutter surfaces each finger as a separate Down → Move → Up stream
+    // keyed by `event.pointer`.  When two are active simultaneously the
+    // move handler below emits a midpoint type-7 event instead of two
+    // independent moves.
+    if (type == 'pointer_down') {
+      _activePointers[event.pointer] = event.position;
+    } else if (type == 'pointer_up') {
+      _activePointers.remove(event.pointer);
+    } else if (type == 'pointer_move') {
+      _activePointers[event.pointer] = event.position;
+    }
 
     // ── (1) Down resets the move + double-tap trackers ────────────────────
     if (type == 'pointer_down') {
@@ -281,7 +345,40 @@ class SankofaReplayRecorder {
       _lastMoveY = -9999;
     }
 
-    // ── (2) Throttle + coalesce pointer_move ──────────────────────────────
+    // ── (2a) Two-finger pinch — REPLACES the regular move path ────────────
+    // When two or more pointers are active the move event represents one
+    // finger of a pinch gesture, not a swipe.  Emit a single midpoint
+    // event per throttle window with rrweb type 7 (Pinch / Zoom) and
+    // skip the regular pointer_move emit so the gesture never
+    // double-records.  `onPointerPanZoomUpdate` further down keeps
+    // covering the desktop / trackpad case.
+    if (type == 'pointer_move' && _activePointers.length >= 2) {
+      if (nowMs - _lastPinchAtMs < _moveThrottleInterval.inMilliseconds) {
+        return;
+      }
+      _lastPinchAtMs = nowMs;
+      final pts = _activePointers.values.take(2).toList();
+      final midX = (pts[0].dx + pts[1].dx) / 2.0;
+      final midY = (pts[0].dy + pts[1].dy) / 2.0;
+      _eventBuffer.add({
+        'type': 3,
+        'timestamp': nowMs,
+        'data': {
+          'source': 2, // MouseInteraction
+          'type': 7,   // rrweb Pinch / Zoom
+          'id': 1,
+          'x': midX,
+          'y': midY + _currentScrollY,
+        },
+        'screen': Sankofa.instance.currentScreen,
+        'time_offset_ms': DateTime.now()
+            .difference(_chunkStartTime!)
+            .inMilliseconds,
+      });
+      return;
+    }
+
+    // ── (2b) Throttle + coalesce single-pointer pointer_move ──────────────
     // 60-120 Hz raw move events are reduced to ~20 Hz max, and any move
     // within MOVE_COALESCE_PX of the previous sample is dropped entirely.
     // Defends against flooding the dashboard heatmap with jitter samples.

@@ -35,6 +35,15 @@ class SankofaReplayBoundary extends StatelessWidget {
       key: SankofaReplay.instance.rootBoundaryKey,
       child: NotificationListener<ScrollNotification>(
         onNotification: (ScrollNotification scrollInfo) {
+          // 🧭 Only forward vertical scrolls.  A page with a horizontal
+          // carousel inside a vertical list emits ScrollNotification for
+          // both axes — without this filter the recorder would overwrite
+          // its `_currentScrollY` with the horizontal carousel's offset
+          // and the next tap's `absoluteY` would be the tap-Y plus a
+          // horizontal value, plotting the dot at a random place on
+          // the heatmap panorama.  Heatmaps render against a vertical
+          // panorama so horizontal scroll position has no meaning here.
+          if (scrollInfo.metrics.axis != Axis.vertical) return false;
           SankofaReplay.instance.recordScrollEvent(
             scrollInfo.metrics.pixels,
           );

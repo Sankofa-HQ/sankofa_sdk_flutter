@@ -51,6 +51,11 @@ class SankofaReplayUploader {
   Future<void> uploadChunk({
     required SankofaReplayMode mode,
     required List<Uint8List> frames,
+    // Per-frame capture timestamps in lockstep with [frames].  Empty
+    // when the recorder didn't supply them — the upload path falls
+    // back to the upload-time millisecond in that case so older
+    // recorders still produce parseable chunks.
+    List<int> frameTimestamps = const [],
     required List<Map<String, dynamic>> events,
     required DateTime? startTime,
     required Map<String, dynamic> deviceContext,
@@ -86,11 +91,25 @@ class SankofaReplayUploader {
 
       if (mode == SankofaReplayMode.screenshot) {
         logger('🚀 Replay: Uploading screenshot chunk ($_chunkIndex) with ${frames.length} frames');
-        payload['frames'] = frames.map((f) => {
-          'timestamp': DateTime.now().toUtc().millisecondsSinceEpoch, 
-          'image_base64': base64Encode(f),
-          'screen': Sankofa.instance.currentScreen,
-        }).toList();
+        // Pair each frame with the timestamp captured when the bitmap
+        // was actually rendered, NOT the upload time.  Without this,
+        // every frame in a 5-frame chunk would get the same millisecond
+        // (one upload-time `DateTime.now()` per .map() iteration) and
+        // the dashboard's session-replay player would render them as a
+        // single still frame instead of an animated sequence.  Falls
+        // back to the upload-time millisecond if the recorder didn't
+        // supply per-frame stamps.
+        final fallbackNow = DateTime.now().toUtc().millisecondsSinceEpoch;
+        payload['frames'] = List<Map<String, dynamic>>.generate(
+          frames.length,
+          (i) => {
+            'timestamp': i < frameTimestamps.length
+                ? frameTimestamps[i]
+                : fallbackNow,
+            'image_base64': base64Encode(frames[i]),
+            'screen': Sankofa.instance.currentScreen,
+          },
+        );
       } else {
         payload['chunk_start_timestamp'] = startTime?.toUtc().millisecondsSinceEpoch ?? DateTime.now().toUtc().millisecondsSinceEpoch;
       }
