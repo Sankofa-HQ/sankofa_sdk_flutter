@@ -31,6 +31,26 @@ dev_dependencies:
 
 # The following section is specific to Flutter packages.
 flutter:
+  # ── Federated plugin declaration ───────────────────────────────────
+  # Phase C — native crash bridging. The Dart-side Catch (`SankofaCatch`
+  # in lib/src/catch/) catches Dart-level errors (FlutterError.onError,
+  # PlatformDispatcher.onError, isolate listeners) but cannot see
+  # NSException / POSIX signals on iOS or JVM-uncaught exceptions / ANRs
+  # on Android. This plugin section wires `SankofaFlutterPlugin` on each
+  # platform to bootstrap the underlying native Sankofa SDK's Catch
+  # module, which DOES handle those native crash paths. Both Dart and
+  # native sides POST to the same `/api/catch/events` endpoint with
+  # disjoint event sources, so no dedup is needed.
+  #
+  # The plugin is a no-op when SankofaCatch isn't auto-started (i.e.
+  # the host passed `enableCatch: false` to `Sankofa.instance.init(...)`).
+  plugin:
+    platforms:
+      android:
+        package: dev.sankofa.flutter
+        pluginClass: SankofaFlutterPlugin
+      ios:
+        pluginClass: SankofaFlutterPlugin
 
   # To add assets to your package, add an assets section, like this:
   # assets:

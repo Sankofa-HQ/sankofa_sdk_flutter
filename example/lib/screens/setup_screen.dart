@@ -102,6 +102,17 @@ class _SetupScreenState extends State<SetupScreen>
         enableCatch: true,
         catchEnvironment: 'test',
         release: 'sankofa-example-flutter@0.1.0',
+        // 🚀 Phase B — beforeSend hook. Runs AFTER an event is composed
+        // but BEFORE it's enqueued. Return null to drop entirely;
+        // return the event (possibly modified) to ship it. Throws are
+        // swallowed.  Demo behaviour: drop events whose message
+        // contains "[noise]" — useful for filtering framework warnings
+        // you can't fix. For PII scrubbing in a real app you'd build
+        // a fresh CatchEvent with the sensitive fields removed.
+        beforeSend: (event) {
+          if (event.message?.contains('[noise]') ?? false) return null;
+          return event;
+        },
       );
       // Pulse registers AFTER init because it reads apiKey + endpoint
       // at register-time (Switch/Config/Catch all pull lazily on

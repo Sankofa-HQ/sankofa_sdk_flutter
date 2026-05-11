@@ -21,6 +21,7 @@ import 'replay/sankofa_replay.dart';
 import 'replay/sankofa_replay_config.dart';
 import 'core/module_registry.dart';
 import 'catch/catch_types.dart';
+import 'catch/native_bridge.dart';
 import 'catch/sankofa_catch.dart';
 import 'utils/logger.dart';
 import 'utils/uri_helper.dart';
@@ -80,11 +81,15 @@ class Sankofa {
   /// [withScope] instead.
   static void setTag(String key, String value) {
     SankofaCatch.instance?.setTag(key, value);
+    // Mirror onto the native side so an NSException / JVM crash that
+    // fires after this call carries the same tag.
+    unawaited(SankofaNativeCatchBridge.setTags({key: value}));
   }
 
   /// Attach multiple tags at once.  Sticky.
   static void setTags(Map<String, String> tags) {
     SankofaCatch.instance?.setTags(tags);
+    unawaited(SankofaNativeCatchBridge.setTags(tags));
   }
 
   /// Attach an arbitrary contextual value to every subsequent event.
@@ -97,6 +102,11 @@ class Sankofa {
   /// Identify the user.  Sticky — pass `null` to clear (e.g. on logout).
   static void setUser(CatchUserContext? user) {
     SankofaCatch.instance?.setUser(user);
+    unawaited(SankofaNativeCatchBridge.setUser(
+      id: user?.id,
+      email: user?.email,
+      username: user?.username,
+    ));
   }
 
   /// Push a custom breadcrumb.  Auto-captured ones (HTTP, navigation,
@@ -132,10 +142,12 @@ class Sankofa {
   /// Force a flush of any pending Catch events.  No-op when Catch
   /// isn't initialized.  Pair with [Sankofa.flush] (the analytics
   /// flush) when you want to evacuate everything before backgrounding.
+  /// Flushes both the Dart-side queue AND the native iOS/Android
+  /// queue so both layers are evacuated.
   static Future<void> flushCatch() async {
     final c = SankofaCatch.instance;
-    if (c == null) return;
-    await c.flush();
+    if (c != null) await c.flush();
+    await SankofaNativeCatchBridge.flush();
   }
 
   late SankofaLogger _logger;
@@ -257,6 +269,21 @@ class Sankofa {
         appVersion: appVersion,
         beforeSend: beforeSend,
       );
+
+      // Phase C — bridge into the native crash reporter on iOS +
+      // Android. The Dart-side Catch above handles Dart errors
+      // (FlutterError.onError, PlatformDispatcher.onError, isolate
+      // listeners); the native bridge picks up what Dart can't see:
+      // NSException + POSIX signals on iOS, JVM-uncaught + ANR on
+      // Android. The bridge is best-effort — failures don't block
+      // init, and on web/desktop it silently no-ops.
+      unawaited(SankofaNativeCatchBridge.initialize(
+        apiKey: apiKey,
+        endpoint: endpoint,
+        environment: catchEnvironment,
+        release: release,
+        appVersion: appVersion,
+      ));
     }
 
     final v1BaseUri = UriHelper.resolveV1BaseUri(endpoint);

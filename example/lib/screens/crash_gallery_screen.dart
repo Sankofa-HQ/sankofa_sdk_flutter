@@ -330,6 +330,80 @@ class _CrashGalleryScreenState extends State<CrashGalleryScreen> {
             await sankofaCatch().flush();
           },
         ),
+
+        // ── Phase B: withScope + beforeSend ──
+        // Demonstrate the Sentry-style temporary-scope overlay.  Tags
+        // and extras set inside the closure ride on ONLY the capture
+        // inside the closure; the global scope (set above via
+        // Sankofa.setTags) is untouched.
+        _Scenario(
+          id: 'phase-b-with-scope',
+          title: 'withScope — temporary scope overlay',
+          detail: 'tags + level + extras attached to ONE capture only',
+          run: () {
+            Sankofa.withScope((scope) {
+              scope.setTag('checkout_step', 'payment');
+              scope.setTag('payment_method', 'stripe');
+              scope.setExtra('cart_id', 'cart_8x92Lq');
+              scope.setExtra('cart_value_cents', 4900);
+              scope.setLevel(CatchLevel.warning);
+              scope.setFingerprint(['checkout', 'payment', 'manual']);
+              try {
+                throw StateError('payment gateway timeout — retried 3x');
+              } catch (e, st) {
+                // Only this event carries the scope's extras + level.
+                Sankofa.captureException(e, st);
+              }
+            });
+            // Subsequent captures lose the scope.
+            Sankofa.captureMessage('post-scope event — no checkout_step tag');
+          },
+        ),
+        _Scenario(
+          id: 'phase-b-with-scope-nested',
+          title: 'withScope — nested scopes',
+          detail: 'inner scope inherits + extends the outer scope at capture time',
+          run: () {
+            Sankofa.withScope((outer) {
+              outer.setTag('feature', 'billing');
+              outer.setExtra('checkout_session', 'sess_12345');
+              Sankofa.withScope((inner) {
+                inner.setTag('substep', 'card-validation');
+                inner.setExtra('attempt', 2);
+                try {
+                  throw ArgumentError('invalid card number checksum');
+                } catch (e, st) {
+                  // This event carries BOTH feature=billing (outer) AND
+                  // substep=card-validation (inner).
+                  Sankofa.captureException(e, st);
+                }
+              });
+              // After inner scope pops, only outer's tags apply here.
+              Sankofa.captureMessage('still in outer scope');
+            });
+          },
+        ),
+        _Scenario(
+          id: 'phase-b-before-send-info',
+          title: 'beforeSend — see SankofaProvider.dart',
+          detail: 'beforeSend is wired at init time; see how the example uses it for PII scrubbing',
+          run: () {
+            // beforeSend is configured at `Sankofa.instance.init(beforeSend: ...)`
+            // — see lib/sankofa_runtime.dart in this example.  This
+            // scenario just fires an event that the configured hook
+            // can choose to scrub or drop.
+            Sankofa.captureMessage(
+              'sensitive event with email — beforeSend should scrub it',
+              const CatchCaptureOptions(
+                level: CatchLevel.info,
+                extra: {
+                  'user_email': 'ada@example.com',
+                  'note': 'beforeSend hook can strip user_email here',
+                },
+              ),
+            );
+          },
+        ),
       ];
 
   Future<void> _simulateApiCall() async {

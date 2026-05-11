@@ -1,0 +1,62 @@
+/*
+ * Phase C — Flutter plugin build script (Android, standalone).
+ *
+ * Bridges the Dart-side `SankofaCatch` to a minimal Android native
+ * crash reporter living entirely inside this plugin's `kotlin/`
+ * directory. We deliberately do NOT depend on the standalone
+ * `dev.sankofa:sankofa` Android SDK Maven artifact — the Android SDK
+ * is a separate product for native Android apps; the Flutter package
+ * owns its own implementation so a Flutter host doesn't pull in the
+ * Android SDK's analytics/replay/Pulse code.
+ */
+group 'dev.sankofa.flutter'
+version '0.1.0'
+
+buildscript {
+    ext.kotlin_version = '2.0.21'
+    repositories {
+        google()
+        mavenCentral()
+    }
+
+    dependencies {
+        classpath 'com.android.tools.build:gradle:8.7.0'
+        classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlin_version"
+    }
+}
+
+allprojects {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+apply plugin: 'com.android.library'
+apply plugin: 'kotlin-android'
+
+android {
+    namespace 'dev.sankofa.flutter'
+    compileSdk 35
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    kotlinOptions {
+        jvmTarget = '17'
+    }
+
+    sourceSets {
+        main.java.srcDirs += 'src/main/kotlin'
+    }
+
+    defaultConfig {
+        minSdk 24
+    }
+    // No `dependencies` block — the plugin is self-contained.
+    // It uses the JDK's `Thread.setDefaultUncaughtExceptionHandler`,
+    // a simple ANR watcher, and Android's standard SharedPreferences
+    // + HttpURLConnection. Nothing extra.
+}
