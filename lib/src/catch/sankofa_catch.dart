@@ -60,6 +60,17 @@ class SankofaCatch implements SankofaModule {
   final Map<String, String> Function()? readFlagSnapshot;
   /// Same as [readFlagSnapshot] but for [SankofaConfig] remote values.
   final Map<String, dynamic> Function()? readConfigSnapshot;
+  /// Synchronous hook fired AFTER event composition but BEFORE the
+  /// transport enqueues. Return `null` to drop, return the (possibly
+  /// modified) event to ship. Throws are swallowed — a host hook can
+  /// never block the capture pipeline.
+  final BeforeSendFn? beforeSend;
+
+  /// Stack of active [SankofaCatchScope] instances pushed by
+  /// [withScope]. The top scope overlays onto every capture inside
+  /// the closure; async captures deferred past the closure's return
+  /// will NOT see the scope (it was popped in `finally`).
+  final List<SankofaCatchScope> _scopeStack = [];
 
   final List<CatchEvent> _buffer = [];
   final _BreadcrumbRing _breadcrumbs = _BreadcrumbRing(100);
@@ -85,6 +96,7 @@ class SankofaCatch implements SankofaModule {
     bool captureRejections = true,
     this.readFlagSnapshot,
     this.readConfigSnapshot,
+    this.beforeSend,
   }) {
     // Static singleton lock-in.  First instance wins so multiple
     // accidental constructions (hot reload, nested test setup) don't
@@ -164,8 +176,24 @@ class SankofaCatch implements SankofaModule {
   void addBreadcrumb(CatchBreadcrumb crumb) => _breadcrumbs.push(crumb);
 
   void setUser(CatchUserContext? user) => _user = user;
+  void setTag(String key, String value) => _tags[key] = value;
   void setTags(Map<String, String> tags) => _tags.addAll(tags);
   void setExtra(String key, dynamic value) => _extra[key] = value;
+
+  /// Run [fn] with a fresh scope. Mutations made via the scope
+  /// (tags, extras, user, level, fingerprint) overlay onto any
+  /// [captureException] / [captureMessage] calls inside [fn]. The
+  /// scope is popped when [fn] returns — async captures deferred past
+  /// the closure's return will NOT see the scope.
+  T withScope<T>(T Function(SankofaCatchScope scope) fn) {
+    final scope = SankofaCatchScope();
+    _scopeStack.add(scope);
+    try {
+      return fn(scope);
+    } finally {
+      _scopeStack.removeLast();
+    }
+  }
 
   /// Flush pending events to the server. No-op if empty.
   Future<void> flush() async {
@@ -325,7 +353,14 @@ class SankofaCatch implements SankofaModule {
     if (!_enabled) return '';
     if (!_shouldSample()) return '';
 
-    final level = options?.level ?? (type == 'console_error' ? CatchLevel.warning : CatchLevel.error);
+    // Apply active withScope() overlay (if any). Layering order:
+    //   global setUser/setTags/setExtra (read below)
+    //   → top-of-stack scope (applyTo here)
+    //   → caller-supplied options (already merged in by applyTo)
+    final scope = _scopeStack.isNotEmpty ? _scopeStack.last : null;
+    final mergedOptions = scope != null ? scope.applyTo(options) : options;
+
+    final level = mergedOptions?.level ?? (type == 'console_error' ? CatchLevel.warning : CatchLevel.error);
 
     CatchException? exc;
     String? msg;
@@ -347,27 +382,45 @@ class SankofaCatch implements SankofaModule {
       type: type,
       exception: exc,
       message: msg,
-      tags: {..._tags, ...?options?.tags},
-      extra: {..._extra, ...?options?.extra},
-      user: options?.user ?? _user,
+      tags: {..._tags, ...?mergedOptions?.tags},
+      extra: {..._extra, ...?mergedOptions?.extra},
+      user: mergedOptions?.user ?? _user,
       device: _buildDeviceContext(),
       release: release,
       platform: 'flutter',
       sdk: {'name': 'sankofa.flutter', 'version': 'flutter-0.1.0'},
       breadcrumbs: _breadcrumbs.snapshot(),
-      fingerprint: options?.fingerprint,
+      fingerprint: mergedOptions?.fingerprint,
       flagSnapshot: readFlagSnapshot?.call() ?? _autoFlagSnapshot(),
       configSnapshot: readConfigSnapshot?.call() ?? _autoConfigSnapshot(),
-      traceId: options?.traceId,
-      spanId: options?.spanId,
+      traceId: mergedOptions?.traceId,
+      spanId: mergedOptions?.spanId,
     );
 
-    _buffer.add(ev);
+    // beforeSend hook — host gets final say. A null return drops the
+    // event; an exception is treated as "pass through unchanged"
+    // because losing telemetry from a buggy hook is worse than the
+    // hook misbehaving.
+    CatchEvent? outgoing = ev;
+    if (beforeSend != null) {
+      try {
+        outgoing = beforeSend!(ev);
+      } catch (e) {
+        if (kDebugMode) debugPrint('[Sankofa Catch] beforeSend threw — sending original event: $e');
+        outgoing = ev;
+      }
+    }
+    if (outgoing == null) {
+      if (kDebugMode) debugPrint('[Sankofa Catch] event $eventId dropped by beforeSend');
+      return '';
+    }
+
+    _buffer.add(outgoing);
     unawaited(_persist());
     if (_buffer.length >= _defaultBatchSize) {
       unawaited(flush());
     }
-    return eventId;
+    return outgoing.eventId;
   }
 
   String? _maybeAnonId() {

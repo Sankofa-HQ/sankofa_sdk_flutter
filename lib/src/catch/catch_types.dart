@@ -407,3 +407,89 @@ class CatchCaptureOptions {
     this.spanId,
   });
 }
+
+/// Synchronous hook called after an event has been composed but BEFORE
+/// the SDK enqueues it for transport. Return the (possibly modified)
+/// event to ship it; return `null` to drop it entirely.
+///
+/// Use cases:
+///   - PII scrubbing (e.g. strip `event.user?.email`)
+///   - Noise filtering (e.g. drop framework-level setState warnings)
+///   - Tag enrichment from state unavailable at SDK init time
+///
+/// Throwing inside the hook is treated like returning the event
+/// unchanged — a host bug must never break the capture pipeline.
+typedef BeforeSendFn = CatchEvent? Function(CatchEvent event);
+
+/// Sentry-style temporary scope. Mutations made via the callback in
+/// `SankofaCatch.instance!.withScope(fn)` overlay onto the next
+/// captured event without polluting the global scope set via
+/// `setUser` / `setTags` / `setExtra`.
+///
+/// ```dart
+/// SankofaCatch.instance!.withScope((scope) {
+///   scope.setTag('checkout_step', 'payment');
+///   scope.setExtra('cart_id', cart.id);
+///   Sankofa.captureException(err);
+/// });
+/// // Outside the closure, those tags / extras are gone.
+/// ```
+class SankofaCatchScope {
+  final Map<String, String> _tags = {};
+  final Map<String, dynamic> _extra = {};
+  CatchUserContext? _user;
+  bool _userTouched = false;
+  CatchLevel? _level;
+  List<String>? _fingerprint;
+
+  SankofaCatchScope setTag(String key, String value) {
+    _tags[key] = value;
+    return this;
+  }
+
+  SankofaCatchScope setTags(Map<String, String> tags) {
+    _tags.addAll(tags);
+    return this;
+  }
+
+  SankofaCatchScope setExtra(String key, dynamic value) {
+    _extra[key] = value;
+    return this;
+  }
+
+  SankofaCatchScope setUser(CatchUserContext? user) {
+    _user = user;
+    _userTouched = true;
+    return this;
+  }
+
+  SankofaCatchScope setLevel(CatchLevel level) {
+    _level = level;
+    return this;
+  }
+
+  SankofaCatchScope setFingerprint(List<String> fingerprint) {
+    _fingerprint = List.unmodifiable(fingerprint);
+    return this;
+  }
+
+  /// Layer this scope on top of the caller's `options`. Caller options
+  /// take precedence (most specific wins); the global scope set on the
+  /// client is applied separately in [SankofaCatch._capture] so this
+  /// merge only covers the scope ↔ options layer.
+  CatchCaptureOptions applyTo(CatchCaptureOptions? options) {
+    return CatchCaptureOptions(
+      level: options?.level ?? _level,
+      tags: {..._tags, ...?options?.tags},
+      extra: {..._extra, ...?options?.extra},
+      // User: caller wins, then scope. `_userTouched` distinguishes
+      // "scope explicitly cleared user with setUser(null)" from "scope
+      // never set user" — only the former should override the client's
+      // global user.
+      user: options?.user ?? (_userTouched ? _user : null),
+      fingerprint: options?.fingerprint ?? _fingerprint,
+      traceId: options?.traceId,
+      spanId: options?.spanId,
+    );
+  }
+}

@@ -76,10 +76,10 @@ class Sankofa {
   }
 
   /// Attach a single tag to every subsequent event.  Sticky — call
-  /// again with a new value to update.  For per-event scoping (Sentry-
-  /// style `withScope`) wait for Phase B.
+  /// again with a new value to update.  For per-event scoping use
+  /// [withScope] instead.
   static void setTag(String key, String value) {
-    SankofaCatch.instance?.setTags({key: value});
+    SankofaCatch.instance?.setTag(key, value);
   }
 
   /// Attach multiple tags at once.  Sticky.
@@ -105,6 +105,28 @@ class Sankofa {
   /// message: 'token refreshed')`.
   static void addBreadcrumb(CatchBreadcrumb crumb) {
     SankofaCatch.instance?.addBreadcrumb(crumb);
+  }
+
+  /// Run [fn] with a temporary scope.  Mutations made via the scope
+  /// (tags, extras, user, level, fingerprint) overlay onto any
+  /// [captureException] / [captureMessage] calls inside [fn].  Outside
+  /// [fn] the scope is gone — async captures deferred past the
+  /// closure's return will NOT see the scope.
+  ///
+  /// No-op when Catch isn't initialized; [fn] still runs with a sink
+  /// scope so host code that does work alongside captures isn't skipped.
+  ///
+  /// ```dart
+  /// Sankofa.withScope((scope) {
+  ///   scope.setTag('flow', 'checkout');
+  ///   scope.setExtra('cart_id', cart.id);
+  ///   Sankofa.captureException(err);
+  /// });
+  /// ```
+  static T withScope<T>(T Function(SankofaCatchScope scope) fn) {
+    final c = SankofaCatch.instance;
+    if (c != null) return c.withScope(fn);
+    return fn(SankofaCatchScope());
   }
 
   /// Force a flush of any pending Catch events.  No-op when Catch
@@ -202,6 +224,11 @@ class Sankofa {
     String catchEnvironment = 'live',
     String? release,
     String? appVersion,
+    /// Synchronous hook called AFTER an event has been composed but
+    /// BEFORE it's enqueued.  Return the (possibly modified) event to
+    /// ship it; return `null` to drop it entirely.  Use for PII
+    /// scrubbing, noise filtering, or late tag enrichment.
+    BeforeSendFn? beforeSend,
   }) async {
     if (_isInitialized) await dispose();
 
@@ -228,6 +255,7 @@ class Sankofa {
         environment: catchEnvironment,
         release: release,
         appVersion: appVersion,
+        beforeSend: beforeSend,
       );
     }
 
