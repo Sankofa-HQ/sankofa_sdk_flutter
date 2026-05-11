@@ -4,36 +4,33 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Sankofa](https://img.shields.io/badge/Made%20with-Sankofa-blueviolet)](https://sankofa.dev)
 
-The official Flutter SDK for [Sankofa Analytics](https://sankofa.dev). Capture every event, resolve user identities, and experience high-fidelity session replays with a single, lightweight package.
+The official Flutter SDK for [Sankofa](https://sankofa.dev) — six products in one package: Analytics, Catch, Switch, Config, Pulse, Replay. Plus a **standalone** native crash bridge that captures iOS NSException + POSIX signals and Android JVM-uncaught + ANR with zero dependency on the iOS / Android SDKs.
 
 ---
 
 ## ✨ Features
 
-- **Event Tracking**: Send custom events with arbitrary properties and automatic device metadata.
-- **Identity Management**: Seamlessly link anonymous users to permanent customer profiles.
-- **Session Replay**: 
-  - **Wireframe Mode**: Ultra-low bandwidth, high-fidelity UI reconstruction.
-  - **Screenshot Mode**: Pixel-perfect visual capture for complex UI debugging.
-  - **Auto-masking**: Sensitive data protection via `SankofaMask`.
-- **Deep Link Attribution**: Automatically captures UTM parameters from incoming links.
-- **Offline Reliability**: Robust local queueing with background auto-flushing.
-- **Privacy First**: Choose what to track and what to mask.
+- **Analytics**: events, identify, peopleSet, deep-link attribution, offline-first queueing.
+- **Catch (Crashlytics + Sentry merged)**: Dart-level errors via `FlutterError.onError` / `PlatformDispatcher.onError` / isolate listeners — plus iOS NSException + POSIX signals + main-queue stalls and Android JVM-uncaught + ANR via the bundled Flutter plugin.
+- **Switch**: feature flags with bundled defaults + onChange listeners.
+- **Config**: remote-config with typed `get<T>` accessors.
+- **Pulse**: in-app surveys (NPS, CSAT, custom).
+- **Session Replay**: wireframe + screenshot modes, automatic input masking, `SankofaMask` widget.
 
 ---
 
-## 🚀 Quick Start
+## 🚀 Quick start
 
 ### 1. Install
 Add the dependency to your `pubspec.yaml`:
 
 ```yaml
 dependencies:
-  sankofa_flutter: ^0.0.1
+  sankofa_flutter: ^0.1.0
 ```
 
 ### 2. Initialize
-Initialize the SDK in your `main` function before `runApp`.
+One line — Catch auto-installs with the SDK. Both Dart errors AND iOS/Android native crashes flow through `Sankofa.captureException` etc.
 
 ```dart
 import 'package:sankofa_flutter/sankofa_flutter.dart';
@@ -43,8 +40,17 @@ void main() async {
 
   await Sankofa.instance.init(
     apiKey: 'YOUR_PROJECT_API_KEY',
-    endpoint: 'https://api.sankofa.dev', // Or your self-hosted instance
-    debug: true, // Enable logging for development
+    endpoint: 'https://api.sankofa.dev',
+    debug: true,
+    // Catch (defaults shown — enableCatch is true by default).
+    enableCatch: true,
+    catchEnvironment: 'production',
+    release: 'myapp@1.4.0',
+    // Optional Sentry-style hook to scrub PII / drop noise.
+    beforeSend: (event) {
+      if (event.message?.contains('setState called after dispose') ?? false) return null;
+      return event;
+    },
   );
 
   runApp(const MyApp());
@@ -53,38 +59,59 @@ void main() async {
 
 ---
 
-## 🛠 Usage Guide
+## 🛠 Usage
 
-### Event Tracking
-Track any user action with a simple method call.
+### Analytics
 
 ```dart
+// Events
 Sankofa.instance.track('completed_purchase', {
   'item_name': 'Vintage Camera',
   'price': 120.50,
   'currency': 'USD',
 });
-```
 
-### Identity & Profiles
-Identify your users to merge their anonymous history into a single profile.
-
-```dart
-// Link anonymous data to a specific user ID
-Sankof.instance.identify('user_99');
-
-// Set user attributes
+// Identity
+Sankofa.instance.identify('user_99');
 Sankofa.instance.setPerson(
   name: 'Jane Doe',
   email: 'jane@example.com',
-  properties: {
-    'membership': 'Gold',
-  },
+  properties: {'membership': 'Gold'},
 );
 ```
 
-### Session Replay
-To enable session replay, wrap your root widget and add the navigator observer.
+### Catch — error capture
+
+Once `init()` resolves, every helper below works from anywhere. No `SankofaCatch.instance` to thread through your widget tree.
+
+```dart
+// Capture a handled exception
+try {
+  await chargeCard(amount);
+} catch (err, stack) {
+  Sankofa.captureException(err, stack);
+}
+
+// Non-error event
+Sankofa.captureMessage('payment retry attempted');
+
+// Crashlytics-style breadcrumb log — rides on next capture, doesn't bill.
+Sankofa.log('checkout: applying coupon SUMMER25');
+
+// Ambient context
+Sankofa.setUser(CatchUserContext(id: 'u_42', email: 'ada@example.com'));
+Sankofa.setTag('flow', 'checkout');
+Sankofa.setExtra('cart_id', cart.id);
+
+// Sentry-style temporary scope — tags only on this capture.
+Sankofa.withScope((scope) {
+  scope.setTag('checkout_step', 'payment');
+  scope.setLevel(CatchLevel.warning);
+  Sankofa.captureException(err);
+});
+```
+
+### Session replay
 
 ```dart
 MaterialApp(
@@ -93,25 +120,56 @@ MaterialApp(
     child: MyHomePage(),
   ),
 );
-```
 
-#### Privacy Masking
-Hide sensitive UI elements from replays using the `SankofaMask` widget.
-
-```dart
+// Hide sensitive UI from replays
 SankofaMask(
-  child: TextField(
-    controller: _passwordController,
-    obscureText: true,
-  ),
+  child: TextField(controller: _passwordController, obscureText: true),
 );
 ```
+
+### Switch — feature flags
+
+```dart
+final flags = SankofaSwitch({'new_checkout': false});
+
+if (flags.getFlag('new_checkout')) showNewCheckout();
+final variant = flags.getVariant('checkout_redesign', defaultValue: 'control');
+```
+
+### Config — remote config
+
+```dart
+final config = SankofaConfig({'max_uploads_per_day': 25});
+
+final maxUploads = config.get<int>('max_uploads_per_day', defaultValue: 25);
+```
+
+### Pulse — surveys
+
+```dart
+await SankofaPulse.instance.register();
+await SankofaPulse.instance.show(context, surveyId: 'nps-2024');
+```
+
+---
+
+## 🪤 Native crash bridge (Phase C)
+
+The Flutter SDK is a **federated plugin** with a standalone native crash reporter in `ios/Classes/` and `android/src/main/kotlin/`. **Zero dependency** on the standalone `SankofaIOS` Pod or `dev.sankofa:sankofa` Maven artifact.
+
+| Layer | Captured |
+|---|---|
+| Dart | `FlutterError.onError`, `PlatformDispatcher.onError`, isolate listeners |
+| iOS plugin | `NSSetUncaughtExceptionHandler`, POSIX signals (SIGSEGV/SIGABRT/SIGBUS/SIGILL/SIGFPE/SIGTRAP/SIGSYS), main-queue stalls |
+| Android plugin | Chained `Thread.UncaughtExceptionHandler`, ANR watcher (main thread > 5s) |
+
+All three POST to the same `/api/catch/events` endpoint. `Sankofa.setUser` / `setTag(s)` / `flushCatch` mirror to the native side automatically.
 
 ---
 
 ## 📑 Documentation
 
-For full API references and integration guides, visit our [Documentation Portal](https://docs.sankofa.dev).
+For full API references and integration guides, visit the [Sankofa docs](https://docs.sankofa.dev/sdks/flutter/overview).
 
 ---
 
