@@ -4,6 +4,7 @@ import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../sankofa_client.dart';
 import 'brand.dart';
 import 'branching.dart';
 import 'pulse_models.dart';
@@ -154,8 +155,15 @@ class _SankofaSurveyDialogState extends State<SankofaSurveyDialog> {
       if (v == null) continue;
       answers[q.id] = v;
     }
+    final activeScreen = Sankofa.instance.hasTaggedScreen
+        ? Sankofa.instance.currentScreen
+        : null;
     widget.onSubmit(
-      PulseSubmitPayload(surveyId: widget.survey.id, answers: answers),
+      PulseSubmitPayload(
+        surveyId: widget.survey.id,
+        answers: answers,
+        screen: activeScreen,
+      ),
     );
   }
 

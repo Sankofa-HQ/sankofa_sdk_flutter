@@ -435,6 +435,13 @@ class PulseSubmitPayload {
   final String surveyId;
   final PulseRespondent respondent;
   final PulseContext? context;
+  /// Active screen / route at submission time. First-class
+  /// cross-product correlation key — same value Heatmap, Catch, and
+  /// Replay use, so a deep link from
+  /// `/dashboard/heatmaps/Identify` to
+  /// `/dashboard/pulse/responses?screen=Identify` lands in the same
+  /// context. Sourced from `Sankofa.instance.currentScreen`.
+  final String? screen;
   final String? submittedAt;
   final Map<String, Object?> answers;
 
@@ -442,6 +449,7 @@ class PulseSubmitPayload {
     required this.surveyId,
     this.respondent = const PulseRespondent(),
     this.context,
+    this.screen,
     this.submittedAt,
     this.answers = const {},
   });
@@ -450,6 +458,7 @@ class PulseSubmitPayload {
     String? surveyId,
     PulseRespondent? respondent,
     PulseContext? context,
+    String? screen,
     String? submittedAt,
     Map<String, Object?>? answers,
   }) =>
@@ -457,6 +466,7 @@ class PulseSubmitPayload {
         surveyId: surveyId ?? this.surveyId,
         respondent: respondent ?? this.respondent,
         context: context ?? this.context,
+        screen: screen ?? this.screen,
         submittedAt: submittedAt ?? this.submittedAt,
         answers: answers ?? this.answers,
       );
@@ -468,6 +478,7 @@ class PulseSubmitPayload {
       'answers': answers,
     };
     if (context != null) map['context'] = context!.toJson();
+    if (screen != null && screen!.isNotEmpty) map['screen'] = screen;
     if (submittedAt != null) map['submitted_at'] = submittedAt;
     return map;
   }

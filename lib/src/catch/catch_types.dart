@@ -285,6 +285,12 @@ class CatchEvent {
   final String? spanId;
   final int? replayChunkIndex;
   final CatchDebugMeta? debugMeta;
+  /// Active screen / route at capture time. Cross-product
+  /// correlation key shared with Heatmap, Replay, Pulse, and Plan.
+  /// Sourced from `Sankofa.instance.currentScreen` (set by the
+  /// `SankofaNavigatorObserver` or an explicit `Sankofa.screen()`
+  /// call).
+  final String? screen;
 
   CatchEvent({
     required this.eventId,
@@ -312,6 +318,7 @@ class CatchEvent {
     this.spanId,
     this.replayChunkIndex,
     this.debugMeta,
+    this.screen,
   });
 
   Map<String, dynamic> toJson() {
@@ -345,6 +352,7 @@ class CatchEvent {
     if (spanId != null) m['span_id'] = spanId;
     if (replayChunkIndex != null) m['replay_chunk_index'] = replayChunkIndex;
     if (debugMeta != null) m['debug_meta'] = debugMeta!.toJson();
+    if (screen != null && screen!.isNotEmpty) m['screen'] = screen;
     return m;
   }
 }

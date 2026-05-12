@@ -395,6 +395,7 @@ class SankofaCatch implements SankofaModule {
       configSnapshot: readConfigSnapshot?.call() ?? _autoConfigSnapshot(),
       traceId: mergedOptions?.traceId,
       spanId: mergedOptions?.spanId,
+      screen: Sankofa.instance.hasTaggedScreen ? Sankofa.instance.currentScreen : null,
     );
 
     // beforeSend hook — host gets final say. A null return drops the
