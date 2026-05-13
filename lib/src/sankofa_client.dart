@@ -9,6 +9,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'sankofa_constants.dart';
 import 'sankofa_deep_links.dart';
+import 'presence_heartbeat.dart';
 import 'sankofa_device_info.dart';
 import 'sankofa_identity.dart';
 import 'sankofa_lifecycle_observer.dart';
@@ -156,6 +157,7 @@ class Sankofa {
   late SankofaSessionManager _sessionManager;
   late SankofaDeepLinks _deepLinks;
   late SankofaLifecycleObserver _lifecycleObserver;
+  PresenceHeartbeat? _presence;
 
   final Map<String, String> _defaultProperties = {};
 
@@ -388,6 +390,20 @@ class Sankofa {
       const Duration(seconds: kFlushIntervalSeconds),
       (_) => _queueManager.flush(),
     );
+
+    // Live-presence heartbeat — independent of analytics flush so it
+    // ticks at its own cadence (15s) while the app is foregrounded.
+    // Cheap one-tiny-POST-per-tick; paused on
+    // AppLifecycleState.paused / hidden.
+    _presence = PresenceHeartbeat(
+      endpoint: endpoint,
+      apiKey: apiKey,
+      payloadProvider: () => (
+        screen: hasTaggedScreen ? _currentScreen : null,
+        distinctId: _identity.distinctId,
+        sessionId: _sessionManager.sessionId,
+      ),
+    )..start();
 
     await track('\$session_start');
 
@@ -661,6 +677,8 @@ class Sankofa {
     _flushTimer?.cancel();
     _deepLinks.dispose();
     _lifecycleObserver.dispose();
+    _presence?.stop();
+    _presence = null;
     SankofaReplay.instance.stopRecording();
   }
 
