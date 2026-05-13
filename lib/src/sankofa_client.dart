@@ -19,6 +19,7 @@ import 'sankofa_people.dart';
 import 'sankofa_queue_manager.dart';
 import 'sankofa_session_manager.dart';
 import 'sankofa_track.dart';
+import 'heatmap/heatmap_snapshotter.dart';
 import 'replay/sankofa_replay.dart';
 import 'replay/sankofa_replay_config.dart';
 import 'core/module_registry.dart';
@@ -159,6 +160,12 @@ class Sankofa {
   late SankofaDeepLinks _deepLinks;
   late SankofaLifecycleObserver _lifecycleObserver;
   PresenceHeartbeat? _presence;
+  /// Dedicated heatmap-background snapshotter. Independent of the
+  /// replay frame loop — fires one stability-gated raster per
+  /// `(screen, viewport-bucket)` per session so the dashboard's
+  /// heatmap renders over a fully-laid-out frame instead of a
+  /// mid-load capture.
+  SankofaHeatmapSnapshotter? _heatmapSnapshotter;
 
   final Map<String, String> _defaultProperties = {};
 
@@ -406,6 +413,20 @@ class Sankofa {
       ),
     )..start();
 
+    // Heatmap snapshotter — reuses the replay recorder's root
+    // RepaintBoundary key so the host only needs one wrap point. Off
+    // the UI thread by virtue of `RenderRepaintBoundary.toImage()`
+    // running on the raster/GPU thread.
+    final String heatmapAppVersion =
+        _defaultProperties['\$app_version'] ?? 'unknown';
+    _heatmapSnapshotter = SankofaHeatmapSnapshotter(
+      boundaryKey: SankofaReplay.instance.rootBoundaryKey,
+      endpoint: endpoint,
+      apiKey: apiKey,
+      appVersion: heatmapAppVersion,
+      debug: debug ? (msg) => _logger.log(msg) : null,
+    );
+
     await track('\$session_start');
 
     _isInitialized = true;
@@ -436,6 +457,11 @@ class Sankofa {
       sessionId: _sessionManager.sessionId,
       properties: properties,
     ));
+    // Stability-gated heatmap snapshot. Deduped inside the
+    // snapshotter — repeated screen() calls on the same view are
+    // no-ops, and a quick re-tag during the settle window supersedes
+    // the previous schedule.
+    _heatmapSnapshotter?.scheduleCapture(screenName);
     _logger.log('📍 Screen changed to: $screenName');
   }
 
@@ -691,6 +717,8 @@ class Sankofa {
     _lifecycleObserver.dispose();
     _presence?.stop();
     _presence = null;
+    _heatmapSnapshotter?.dispose();
+    _heatmapSnapshotter = null;
     SankofaReplay.instance.stopRecording();
   }
 
