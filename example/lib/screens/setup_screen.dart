@@ -1,7 +1,16 @@
 import 'package:flutter/material.dart';
 import 'package:sankofa_flutter/sankofa_flutter.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../sankofa_runtime.dart';
 import 'event_tester_screen.dart';
+
+/// Persistence keys for the connect form. Kept here (and on
+/// `EventTesterScreen` for the Disconnect button) so they stay in
+/// lock-step — if you rename one you'll get an analyzer error pointing
+/// at the other.
+const String setupPrefsEngineUrl = 'sankofa.example.endpoint';
+const String setupPrefsApiKey = 'sankofa.example.apiKey';
+const String setupDefaultEngineUrl = 'http://localhost:8080';
 
 class SetupScreen extends StatefulWidget {
   const SetupScreen({super.key});
@@ -16,18 +25,13 @@ class _SetupScreenState extends State<SetupScreen>
   static const _apiKeyFieldKey = Key('setup-api-key-field');
   static const _connectButtonKey = Key('setup-connect-button');
 
-  String _getDefaultEngineUrl() {
-    return 'http://172.20.10.6:8080';
-  }
-
   late final _engineUrlController = TextEditingController(
-    text: _getDefaultEngineUrl(),
+    text: setupDefaultEngineUrl,
   );
-  final _apiKeyController = TextEditingController(
-    // text: 'sk_test_b25f965d194d55bd071fb23921401e7c',
-  );
+  final _apiKeyController = TextEditingController();
 
   bool _connecting = false;
+  bool _hydrating = true;
   bool _debugMode = true;
   bool _trackLifecycleEvents = true;
   bool _enableSessionReplay = true;
@@ -46,6 +50,34 @@ class _SetupScreenState extends State<SetupScreen>
     _pulseAnimation = Tween<double>(begin: 0.6, end: 1.0).animate(
       CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut),
     );
+
+    // Hydrate persisted creds. If both are present we auto-connect on
+    // the next frame so returning users land straight in the demo,
+    // matching the iOS / Android / web examples' "no second-launch
+    // form" UX. While hydrating we render a neutral spinner so the
+    // form doesn't briefly flash before the auto-connect navigates
+    // away.
+    _hydrateAndMaybeAutoConnect();
+  }
+
+  Future<void> _hydrateAndMaybeAutoConnect() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final savedKey = prefs.getString(setupPrefsApiKey)?.trim() ?? '';
+      final savedUrl = prefs.getString(setupPrefsEngineUrl)?.trim() ?? '';
+      if (savedUrl.isNotEmpty) _engineUrlController.text = savedUrl;
+      if (savedKey.isNotEmpty) {
+        _apiKeyController.text = savedKey;
+        // Defer to a microtask so the build phase doesn't see an
+        // in-flight `Navigator.pushReplacement`.
+        await Future.microtask(() => _connect(autoConnect: true));
+        return;
+      }
+    } catch (_) {
+      // Storage failures (rare — typically a fresh install) fall
+      // through to the manual connect flow.
+    }
+    if (mounted) setState(() => _hydrating = false);
   }
 
   @override
@@ -56,21 +88,37 @@ class _SetupScreenState extends State<SetupScreen>
     super.dispose();
   }
 
-  Future<void> _connect() async {
+  Future<void> _connect({bool autoConnect = false}) async {
     final url = _engineUrlController.text.trim();
     final key = _apiKeyController.text.trim();
 
     if (url.isEmpty || key.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: const Text('Please fill in both fields'),
-          backgroundColor: Colors.red.shade700,
-        ),
-      );
+      if (!autoConnect) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: const Text('Please fill in both fields'),
+            backgroundColor: Colors.red.shade700,
+          ),
+        );
+      }
       return;
     }
 
-    setState(() => _connecting = true);
+    setState(() {
+      _connecting = true;
+      _hydrating = false;
+    });
+    // Persist BEFORE init so a failed init still leaves the next
+    // launch with the same creds prefilled. Matches the iOS / Android
+    // examples — Disconnect is the only path that wipes them.
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(setupPrefsApiKey, key);
+      await prefs.setString(setupPrefsEngineUrl, url);
+    } catch (_) {
+      // Persistence failures aren't fatal — the SDK still inits below,
+      // we just won't auto-skip on next launch.
+    }
     try {
       // Construct the Switch + Config singletons BEFORE init so they
       // register with the Traffic Cop before the first handshake
@@ -137,6 +185,23 @@ class _SetupScreenState extends State<SetupScreen>
 
   @override
   Widget build(BuildContext context) {
+    // Hydration phase: persisted creds may auto-connect us in a frame
+    // or two. Render a neutral splash so the form doesn't flash before
+    // the navigator replaces this route.
+    if (_hydrating) {
+      return Scaffold(
+        body: Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              _buildLogo(),
+              const SizedBox(height: 24),
+              const CircularProgressIndicator(color: Color(0xFF6C5CE7)),
+            ],
+          ),
+        ),
+      );
+    }
     return Scaffold(
       body: Center(
         child: SingleChildScrollView(

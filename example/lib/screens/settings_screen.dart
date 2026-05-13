@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:sankofa_flutter/sankofa_flutter.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'setup_screen.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
@@ -89,7 +91,34 @@ class _SettingsScreenState extends State<SettingsScreen> {
     return ListTile(
       leading: Icon(icon, color: color),
       title: Text(label),
-      onTap: () => Sankofa.instance.track('settings_click', {'label': label}),
+      // The bundled "Logout" account row doubles as the
+      // Disconnect-and-forget-key control. Tapping it wipes the
+      // persisted Sankofa creds and routes back to SetupScreen so
+      // the next session re-enters the API key, matching the iOS /
+      // Android / web examples' Disconnect UX.
+      onTap: () async {
+        Sankofa.instance.track('settings_click', {'label': label});
+        if (label == 'Logout') {
+          await _disconnect();
+        }
+      },
+    );
+  }
+
+  Future<void> _disconnect() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove(setupPrefsApiKey);
+      await prefs.remove(setupPrefsEngineUrl);
+    } catch (_) {
+      // Persistence errors here are non-fatal — the navigation below
+      // still returns the user to the connect screen, which is the
+      // important UX guarantee.
+    }
+    if (!mounted) return;
+    Navigator.of(context).pushAndRemoveUntil(
+      MaterialPageRoute(builder: (_) => const SetupScreen()),
+      (route) => false,
     );
   }
 }
