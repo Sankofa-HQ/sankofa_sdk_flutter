@@ -10,6 +10,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'sankofa_constants.dart';
 import 'sankofa_deep_links.dart';
 import 'presence_heartbeat.dart';
+import 'screen_seen.dart';
 import 'sankofa_device_info.dart';
 import 'sankofa_identity.dart';
 import 'sankofa_lifecycle_observer.dart';
@@ -415,15 +416,26 @@ class Sankofa {
   /// Crucial for building accurate Heatmaps in the Dashboard.
   Future<void> screen(String screenName, [Map<String, dynamic>? properties]) async {
     if (!_isInitialized) return;
-    
+
     _currentScreen = screenName;
     _defaultProperties['\$screen_name'] = screenName;
 
     // Fire a standard screen_view event
     final screenProps = properties ?? {};
     screenProps['\$screen_name'] = screenName;
-    
+
     await track('\$screen_view', screenProps);
+    // Canonical screen signal — fires regardless of which Sankofa
+    // products the host has enabled, so the lexicon + dwell + presence
+    // are always populated.
+    unawaited(emitScreenSeen(
+      endpoint: _endpoint ?? '',
+      apiKey: _apiKey ?? '',
+      screen: screenName,
+      distinctId: _identity.distinctId,
+      sessionId: _sessionManager.sessionId,
+      properties: properties,
+    ));
     _logger.log('📍 Screen changed to: $screenName');
   }
 
