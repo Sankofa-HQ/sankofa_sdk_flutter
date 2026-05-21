@@ -24,6 +24,16 @@ export 'src/config/sankofa_config.dart' show SankofaConfig;
 export 'src/config/item_decision.dart'
     show ItemDecision, ItemReason, ConfigType, ConfigChangeListener;
 
+// Sankofa Deploy — OTA updates (Flutter Code)
+export 'src/deploy/sankofa_deploy.dart' show SankofaDeploy;
+export 'src/deploy/deploy_config.dart' show SankofaDeployOptions;
+export 'src/deploy/update_status.dart' show UpdateStatus;
+
+// Module integration status — let hosts read the audit result
+// (e.g. to show their own UI when integration is incomplete).
+export 'src/core/module_registry.dart'
+    show ModuleIntegrationStatus, ModuleIntegrationLevel, SankofaModuleName;
+
 // Sankofa Catch — error tracking + crash reporting
 export 'src/catch/sankofa_catch.dart' show SankofaCatch;
 export 'src/catch/catch_types.dart'

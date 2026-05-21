@@ -48,15 +48,28 @@ class SankofaFlutterPlugin : FlutterPlugin, MethodCallHandler {
     private lateinit var channel: MethodChannel
     private var appContext: Context? = null
 
+    /**
+     * Sankofa Deploy plugin — packaged inside this SDK so the host's
+     * MainActivity can extend `com.sankofa.deploy.SankofaFlutterActivity`
+     * without having to pull a separate plugin dependency. Lifecycle is
+     * delegated from our own `onAttachedToEngine` / `onDetachedFromEngine`
+     * so a single `pluginClass: SankofaFlutterPlugin` registration in
+     * pubspec.yaml wires up both the native crash bridge and the Deploy
+     * method channel.
+     */
+    private val deployPlugin = com.sankofa.deploy.SankofaDeployPlugin()
+
     override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
         appContext = binding.applicationContext
         channel = MethodChannel(binding.binaryMessenger, "sankofa_flutter/native_catch")
         channel.setMethodCallHandler(this)
+        deployPlugin.onAttachedToEngine(binding)
     }
 
     override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
         channel.setMethodCallHandler(null)
         appContext = null
+        deployPlugin.onDetachedFromEngine(binding)
     }
 
     override fun onMethodCall(call: MethodCall, result: Result) {

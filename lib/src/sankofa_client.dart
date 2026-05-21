@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io' show Platform;
 import 'dart:math';
 import 'dart:ui' as ui;
+import 'package:flutter/foundation.dart' show kDebugMode;
 import 'package:http/http.dart' as http;
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -26,6 +27,9 @@ import 'core/module_registry.dart';
 import 'catch/catch_types.dart';
 import 'catch/native_bridge.dart';
 import 'catch/sankofa_catch.dart';
+import 'core/module_registry.dart' show ModuleIntegrationStatus;
+import 'deploy/deploy_config.dart';
+import 'deploy/sankofa_deploy.dart';
 import 'utils/logger.dart';
 import 'utils/uri_helper.dart';
 
@@ -206,6 +210,33 @@ class Sankofa {
   /// The server endpoint passed to init(). Null when init() hasn't completed.
   String? get endpoint => _endpoint;
 
+  /// Cached integration self-audit result from the most recent Deploy
+  /// initialization. Null when Deploy isn't enabled or hasn't finished
+  /// initializing yet. Future work: forward this to the server in the
+  /// reverse handshake so the dashboard can surface "SDK integration
+  /// incomplete" warnings to the developer.
+  ModuleIntegrationStatus? _lastDeployIntegrationStatus;
+  ModuleIntegrationStatus? get lastDeployIntegrationStatus => _lastDeployIntegrationStatus;
+
+  // ─────────────────────────────────────────────────────────────────
+  //  Module accessors — `Sankofa.instance.deploy`, `.flags`, `.config`,
+  //  `.errors`, `.pulse`.
+  //
+  // Each returns the singleton constructed during `init()` when the
+  // corresponding `enableX` flag was true (or that the host built
+  // manually via the legacy constructor). Returns null otherwise — the
+  // host gets a quiet no-op-friendly accessor rather than a thrown
+  // exception, mirroring the RN SDK.
+  // ─────────────────────────────────────────────────────────────────
+
+  /// Sankofa Deploy — OTA updates. Construct via
+  /// `Sankofa.instance.init(enableDeploy: true)`.
+  SankofaDeploy? get deploy => SankofaDeploy.instance;
+
+  /// Sankofa Catch — errors + crashes. Construct via
+  /// `Sankofa.instance.init(enableCatch: true)` (default true).
+  SankofaCatch? get errors => SankofaCatch.instance;
+
   /// Current identity — distinct_id + anonymous_id state. Modules that
   /// need to attach user identity to their own events (e.g. Catch) read
   /// from this rather than duplicating the identity machinery.
@@ -251,6 +282,19 @@ class Sankofa {
     /// ship it; return `null` to drop it entirely.  Use for PII
     /// scrubbing, noise filtering, or late tag enrichment.
     BeforeSendFn? beforeSend,
+    // ── Deploy (OTA updates) ──────────────────────────────────────
+    //
+    // When [enableDeploy] is true the SDK auto-constructs the
+    // [SankofaDeploy] singleton, hands it the shared apiKey/endpoint,
+    // and (per [SankofaDeployOptions.autoCheckOnStartup]) fires off
+    // an initial update check. Access via `Sankofa.instance.deploy`.
+    //
+    // Defaults to false because Deploy is a separately-purchased
+    // product family — flipping this on without a Sankofa Deploy
+    // subscription just gives a no-op (the server refuses to issue
+    // patches). Hosts opt in via init.
+    bool enableDeploy = false,
+    SankofaDeployOptions deployOptions = const SankofaDeployOptions(),
   }) async {
     if (_isInitialized) await dispose();
 
@@ -294,6 +338,57 @@ class Sankofa {
         release: release,
         appVersion: appVersion,
       ));
+    }
+
+    // ── Deploy (OTA updates) ────────────────────────────────────────
+    //
+    // Auto-construct the [SankofaDeploy] singleton if the host opted
+    // in. The platform plugin (Kotlin on Android, Swift on iOS — Phase
+    // 6) is initialized lazily inside `SankofaDeploy.initInternal`.
+    // We do NOT block init on the platform-channel call so a flaky
+    // native side doesn't deadlock the rest of the SDK; failures land
+    // in the platform logger and surface on the first
+    // `Sankofa.deploy.checkForUpdate()` call.
+    if (enableDeploy && SankofaDeploy.instance == null) {
+      unawaited(SankofaDeploy.initInternal(
+        apiKey: apiKey,
+        endpoint: endpoint,
+        options: deployOptions,
+      ).then((deploy) async {
+        // Post-init integration self-audit. Warns in debug mode when
+        // the host's manifest, MainActivity, permissions, or meta-data
+        // are missing pieces that would make OTA silently fail at
+        // runtime. Result is cached for the reverse handshake (server-
+        // side dashboard "SDK integration incomplete" badge, future).
+        final status = await deploy.checkIntegration();
+        _lastDeployIntegrationStatus = status;
+        if (!status.isFull && kDebugMode) {
+          // ignore: avoid_print
+          print('');
+          // ignore: avoid_print
+          print('────────────────────────────────────────────────');
+          // ignore: avoid_print
+          print('[Sankofa Deploy] integration: ${status.level.name.toUpperCase()}');
+          for (final m in status.missing) {
+            // ignore: avoid_print
+            print('  ✖ $m');
+          }
+          for (final w in status.warnings) {
+            // ignore: avoid_print
+            print('  ! $w');
+          }
+          // ignore: avoid_print
+          print('────────────────────────────────────────────────');
+          // ignore: avoid_print
+          print('');
+        }
+      }).catchError((Object err, StackTrace st) {
+        // Audit failures are non-fatal — leave a debug breadcrumb only.
+        if (kDebugMode) {
+          // ignore: avoid_print
+          print('[Sankofa Deploy] integration audit threw: $err');
+        }
+      }));
     }
 
     final v1BaseUri = UriHelper.resolveV1BaseUri(endpoint);

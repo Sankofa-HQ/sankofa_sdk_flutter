@@ -55,6 +55,54 @@ extension SankofaModuleNameExt on SankofaModuleName {
   }
 }
 
+/// Reports how complete the host's integration of a given module is.
+///
+/// `enableDeploy: true` in `Sankofa.init` is intent — it does NOT
+/// guarantee the host actually patched their AndroidManifest, extended
+/// the right Activity, or granted the right permissions. Each module
+/// self-audits via [SankofaModule.checkIntegration] and reports back:
+///
+///  - **full** — everything wired, OTA / module operations will work
+///  - **partial** — module constructed but missing pieces will silently
+///    break some operations (e.g. INTERNET permission not granted →
+///    network calls fail; MainActivity not extending
+///    SankofaFlutterActivity → patches install but don't load)
+///  - **broken** — fundamental wiring missing, module is non-functional
+///    (e.g. SankofaDeployApplication not in manifest → Updater never
+///    initializes pre-Dart)
+///
+/// In debug builds the Core prints warnings for anything below `full`
+/// so the developer sees the gap during development. Future work:
+/// forward this status to the server in the reverse-handshake so the
+/// dashboard can show a "SDK integration incomplete" badge.
+enum ModuleIntegrationLevel { full, partial, broken }
+
+class ModuleIntegrationStatus {
+  ModuleIntegrationStatus({
+    required this.module,
+    required this.level,
+    this.missing = const [],
+    this.warnings = const [],
+  });
+
+  factory ModuleIntegrationStatus.full(SankofaModuleName name) =>
+      ModuleIntegrationStatus(module: name, level: ModuleIntegrationLevel.full);
+
+  final SankofaModuleName module;
+  final ModuleIntegrationLevel level;
+
+  /// Required pieces that are missing. Each string is human-readable
+  /// (suitable for printing). Empty when `level == full`.
+  final List<String> missing;
+
+  /// Non-blocking concerns (e.g. "running on emulator, OTA won't be
+  /// realistic"). Doesn't downgrade `level`.
+  final List<String> warnings;
+
+  bool get isFull => level == ModuleIntegrationLevel.full;
+  bool get isUsable => level != ModuleIntegrationLevel.broken;
+}
+
 /// Interface every pluggable module implements. The Core never imports
 /// concrete module classes — it only talks to them through this shape.
 abstract class SankofaModule {
@@ -65,6 +113,13 @@ abstract class SankofaModule {
   /// update check). If `enabled: false`, this is NOT called — the
   /// module stays dormant.
   Future<void> applyHandshake(Map<String, dynamic> config);
+
+  // Note: integration self-audit is not part of this interface — every
+  // module would have to implement it, even the trivial ones (Switch,
+  // Config, Pulse) whose answer is always "full". Concrete modules
+  // expose their own `checkIntegration()` method when they have
+  // host-side wiring that can be incomplete (Deploy is the main one);
+  // the Core invokes it via runtime type-check.
 }
 
 class SankofaModuleRegistry {
