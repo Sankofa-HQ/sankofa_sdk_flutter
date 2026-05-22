@@ -28,6 +28,7 @@ import 'catch/catch_types.dart';
 import 'catch/native_bridge.dart';
 import 'catch/sankofa_catch.dart';
 import 'core/module_registry.dart' show ModuleIntegrationStatus;
+import 'core/integration_reporter.dart';
 import 'deploy/deploy_config.dart';
 import 'deploy/sankofa_deploy.dart';
 import 'utils/logger.dart';
@@ -362,6 +363,19 @@ class Sankofa {
         // side dashboard "SDK integration incomplete" badge, future).
         final status = await deploy.checkIntegration();
         _lastDeployIntegrationStatus = status;
+        // Reverse handshake — fire-and-forget POST so the dashboard's
+        // SDK Health page sees this app's integration state. Other
+        // modules will append to the batch as they ship their own
+        // checkIntegration audits. Errors are swallowed inside the
+        // reporter; we wrap in unawaited so a slow network never blocks
+        // the rest of init.
+        unawaited(reportIntegrationStatuses(
+          apiKey: apiKey,
+          serverBaseUri: UriHelper.resolveServerBaseUri(endpoint),
+          statuses: [status],
+          appVersion: appVersion,
+          debug: kDebugMode,
+        ));
         if (!status.isFull && kDebugMode) {
           // ignore: avoid_print
           print('');
