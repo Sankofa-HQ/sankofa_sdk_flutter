@@ -1,45 +1,35 @@
 import Foundation
+import SankofaUpdaterFFI
 
 /// Swift-side façade over the Sankofa Rust updater's iOS FFI surface.
 ///
 /// Mirrors the Android `SankofaUpdaterJNI` API one-to-one so the
-/// Dart-facing behaviour is identical across platforms. Once the
-/// Rust updater is ported to iOS (Phase 6 — Rust updater on iOS), the
-/// `native*` methods will bind to the FFI symbols via `@_silgen_name`
-/// or a `module.modulemap` exposing the C header from
-/// `cli/sankofa-cli/rust/sankofa-updater-ffi/include`.
+/// Dart-facing behaviour is identical across platforms. The
+/// underlying static library is shipped by the
+/// `SankofaUpdaterFFI.xcframework` vendored in the sankofa_flutter
+/// pod, built by `flutter-deploy/sankofa-flutter-deploy/updater/build-ios.sh`.
 ///
-/// **Current state** (Phase 6 not done): every `native*` method is a
-/// stub that returns the "no active patch / not initialized" value.
-/// This is intentional — it lets:
-///
-///   - the CLI's `init --deploy --flutter` auto-patch reference
-///     `SankofaFlutterAppDelegate` today, without compile errors,
-///   - `SankofaFlutterAppDelegate` fall through cleanly to vanilla
-///     Flutter behaviour (no override → APK-default snapshot loads),
-///   - the API surface customers wire up to remain stable when the
-///     Rust port lands — only this file changes, not their code.
-///
-/// When the Rust port ships, `nativeGetLibappPath()` returns the
-/// resolved path to the OTA-installed AOT snapshot (analog of
-/// Android's `libapp.so` — on iOS, the App framework's AOT image
-/// inside `App.framework/App`).
+/// All `native*` calls below cross into the Rust core via the C ABI
+/// declared in `sankofa_updater.h`. The Rust side is thread-safe (every
+/// entry wraps a Mutex around the Manager singleton), so it's safe to
+/// call from any queue — though in practice all initialization happens
+/// once on the main queue during `application(_:didFinishLaunchingWithOptions:)`.
 public enum SankofaUpdaterBridge {
 
-    /// True once any caller has successfully invoked `nativeInit`.
-    /// Read by the SankofaDeploy plugin to short-circuit the Dart-side
-    /// init when something earlier in app lifecycle has already run
-    /// pre-engine. Mirrors Android's `SankofaUpdaterJNI.isInitialized`.
+    /// True once `nativeInit` has been called with a non-error return
+    /// code. Toggled by the AppDelegate's pre-engine hook and read by
+    /// the Dart-side SankofaDeploy plugin to short-circuit redundant
+    /// re-initialisation when the host already wired things up.
     public static var isInitialized: Bool = false
 
-    /// Sankofa API key (`sk_live_*` / `sk_test_*`). Set by whichever
-    /// code path initializes the updater first (the AppDelegate's
-    /// `application(_:didFinishLaunchingWithOptions:)` reading
-    /// Info.plist, or the Dart side via the SankofaDeploy plugin).
+    /// Sankofa API key (`sk_live_*` / `sk_test_*`). Resolved by
+    /// `SankofaFlutterAppDelegate.configureSankofaFromInfoPlist()`
+    /// from the `com.sankofa.apiKey` key the CLI's `init` command
+    /// writes to Info.plist.
     public static var apiKey: String?
 
     /// Sankofa API endpoint base URL. Trailing slashes stripped at
-    /// write time so URL construction is unambiguous.
+    /// write time so downstream URL construction stays unambiguous.
     public static var endpoint: String? {
         didSet {
             if let raw = endpoint, raw.hasSuffix("/") {
@@ -48,9 +38,9 @@ public enum SankofaUpdaterBridge {
         }
     }
 
-    /// Initialize the iOS Rust updater. Stub until Phase 6 lands —
-    /// returns `notInitialized` so callers fall through to vanilla
-    /// Flutter behaviour.
+    /// Initialize the Rust updater. Wraps `sankofa_updater_init`. All
+    /// four arguments must be non-empty strings; passing empties to
+    /// Rust would surface as `SANKOFA_INVALID_INPUT`.
     @discardableResult
     public static func nativeInit(
         appId: String,
@@ -58,73 +48,90 @@ public enum SankofaUpdaterBridge {
         dataDir: String,
         baselineEngineVersion: String
     ) -> SankofaUpdaterReturnCode {
-        // Phase 6 will replace this stub with a call into the Rust
-        // updater's iOS FFI: `sankofa_updater_init(app_id, …)`.
-        // The Android side stores `apiKey` / `endpoint` from the
-        // earliest init caller; mirror that here so the configuration
-        // is observable even though the actual init is a no-op.
-        return .notInitialized
+        let rc = appId.withCString { appIdC in
+            baselineLibappPath.withCString { baselineC in
+                dataDir.withCString { dataDirC in
+                    baselineEngineVersion.withCString { engineVerC in
+                        sankofa_updater_init(appIdC, baselineC, dataDirC, engineVerC)
+                    }
+                }
+            }
+        }
+        let code = SankofaUpdaterReturnCode(rawValue: Int(rc)) ?? .fatal
+        // SANKOFA_OK and SANKOFA_RECOVERED both indicate a working
+        // updater — the rolled-back boot is still a successful init.
+        if code == .ok || code == .recovered {
+            isInitialized = true
+        }
+        return code
     }
 
-    /// Returns the absolute filesystem path to the active OTA-installed
-    /// AOT snapshot, or `nil` if no patch is active OR the updater has
-    /// not been initialized.
-    ///
-    /// `SankofaFlutterAppDelegate` queries this on first engine boot
-    /// and, when non-nil, passes the path to Flutter as
-    /// `--aot-shared-library-name=<path>` — the same engine flag the
-    /// Android `SankofaFlutterActivity` uses.
+    /// Returns the absolute filesystem path the Flutter engine should
+    /// load the AOT snapshot from, or `nil` if init hasn't run or
+    /// returned an error. The C string is owned by the Rust updater
+    /// — we copy into a Swift `String` so the caller doesn't have to
+    /// reason about pointer lifetime.
     public static func nativeGetLibappPath() -> String? {
-        // Phase 6: bridge to `sankofa_updater_get_libapp_path()`.
-        return nil
+        guard let ptr = sankofa_updater_get_libapp_path() else { return nil }
+        return String(cString: ptr)
     }
 
-    /// Returns the active patch version string (e.g. "v1.2.3-hotfix")
-    /// or nil when no patch is active. Surfaced to Dart via the plugin
-    /// so apps can read `Sankofa.instance.deploy?.activeVersion`.
+    /// Returns the active patch version (`"baseline"` or e.g.
+    /// `"v1.2.3-hotfix"`). nil before init or after a fatal error.
     public static func nativeGetActiveVersion() -> String? {
-        return nil
+        guard let ptr = sankofa_updater_get_active_version() else { return nil }
+        return String(cString: ptr)
     }
 
-    /// Called by the Dart side from `notifyAppReady()` once the app's
-    /// first frame has rendered without crashing. Tells the updater
-    /// the active patch is safe to "promote" — future cold boots will
-    /// continue serving it instead of rolling back to the baseline.
+    /// Notify the Rust updater that the app reached its first frame
+    /// without crashing. Called from the Dart plugin once `runApp(...)`
+    /// resolves cleanly.
     public static func nativeNotifyAppReady() {
-        // Phase 6: bridge to `sankofa_updater_notify_app_ready()`.
+        sankofa_updater_notify_app_ready()
     }
 
-    /// Called from the iOS NSException + signal handler in
-    /// `SankofaFlutterPlugin.swift` so the Rust updater can roll back
-    /// the active patch on the next cold boot. Idempotent.
+    /// Record a crash. Called from the iOS NSException handler in
+    /// `SankofaFlutterPlugin.swift` so the next boot's init can decide
+    /// whether to roll back the active patch.
     public static func nativeReportCrash() {
-        // Phase 6: bridge to `sankofa_updater_report_crash()`.
+        sankofa_updater_report_crash()
     }
 
-    /// Tear-down hook for hot-reload / process-survives-test paths.
-    /// Production app processes never call this — the OS reclaims the
-    /// updater state when the process exits.
+    /// Drop the updater singleton. Mobile apps rarely need this; we
+    /// keep it for hot-reload + test scenarios where the same process
+    /// re-inits the updater repeatedly.
     public static func nativeShutdown() {
-        // Phase 6: bridge to `sankofa_updater_shutdown()`.
+        sankofa_updater_shutdown()
+        isInitialized = false
     }
 
-    /// SDK version string the Dart plugin surfaces via
-    /// `Sankofa.instance.deploy?.engineForkVersion`. Pulled from the
-    /// Flutter engine binary's compile-time fork suffix (the
-    /// `<commit>+sankofa-1` marker added by the Phase 6 iOS-fork-marker
-    /// engine patch) once Phase 6 wires the FFI bridge.
+    /// FFI library version string (matches Cargo.toml's package
+    /// version). Useful as a runtime smoke-test that the static lib
+    /// linked cleanly + as the value surfaced to Dart via
+    /// `Sankofa.instance.deploy?.engineForkVersion`.
     public static func nativeVersion() -> String {
-        // Phase 6: bridge to `sankofa_updater_version()`.
-        return "0.0.0-stub"
+        guard let ptr = sankofa_updater_version() else { return "unknown" }
+        return String(cString: ptr)
+    }
+
+    /// Mark the current patch dead. Returns the same int the C ABI
+    /// returns: 0 = no patch was active (no-op), 1 = marked dead,
+    /// negative = persistence error. Surfaced to the Dart plugin as
+    /// `disableCurrentPatch()`.
+    @discardableResult
+    public static func nativeDisableCurrentPatch() -> Int {
+        return Int(sankofa_updater_disable_current_patch())
     }
 }
 
-/// Mirrors the Android `SankofaUpdaterReturnCode` and the C-side
-/// `SANKOFA_*` constants so the Dart-facing API behaves identically.
+/// Mirrors the C-side `SankofaUpdaterReturnCode` enum exposed in
+/// `sankofa_updater.h`. Kept as a Swift-native enum so callers can
+/// pattern-match without dragging raw `Int32` everywhere.
 public enum SankofaUpdaterReturnCode: Int {
     case ok = 0
     case invalidInput = 1
     case recovered = 2
     case fatal = 3
+    /// `nativeInit` returned a code we don't recognise. Treat as fatal.
     case notInitialized = -1
 }

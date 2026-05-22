@@ -1,0 +1,18 @@
+// module.modulemap — Clang module map so Swift can `import SankofaUpdaterFFI`
+// directly from the SankofaUpdaterFFI.xcframework that build-ios.sh ships.
+//
+// The xcodebuild -create-xcframework -headers <dir> command copies every
+// file in this directory into each slice's Headers/ subdir, including this
+// modulemap. Xcode then exposes the umbrella header (sankofa_updater.h) as
+// a Clang module the Swift compiler can resolve via `import`.
+//
+// Without this map, the static lib still links but Swift consumers have to
+// fall back to @_silgen_name annotations or a bridging header. With it,
+// SankofaUpdaterBridge.swift can just say `import SankofaUpdaterFFI` and
+// call sankofa_updater_init(...) like any other C function.
+
+framework module SankofaUpdaterFFI {
+    umbrella header "sankofa_updater.h"
+    export *
+    module * { export * }
+}

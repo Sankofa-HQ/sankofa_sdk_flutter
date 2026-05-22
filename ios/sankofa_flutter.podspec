@@ -38,7 +38,24 @@ the standalone iOS SDK.
   s.dependency 'Flutter'
   s.platform = :ios, '13.0'
 
-  # Flutter.framework does not contain a i386 slice.
-  s.pod_target_xcconfig = { 'DEFINES_MODULE' => 'YES', 'EXCLUDED_ARCHS[sdk=iphonesimulator*]' => 'i386' }
+  # Phase 6 (Sankofa Deploy OTA): vendor the Rust updater xcframework
+  # built by flutter-deploy/sankofa-flutter-deploy/updater/build-ios.sh.
+  # Xcode picks ios-arm64 for devices, ios-arm64_x86_64-simulator for
+  # both Apple Silicon and Intel simulators. The framework ships the
+  # sankofa_updater.h umbrella header + module.modulemap so
+  # SankofaUpdaterBridge.swift can `import SankofaUpdaterFFI` directly.
+  s.vendored_frameworks = 'SankofaUpdaterFFI.xcframework'
+
+  # Flutter.framework does not contain a i386 slice. iOS 13+ has been
+  # arm64-only on devices since iOS 11, so the Excluded arch on sim is
+  # purely belt-and-braces.
+  s.pod_target_xcconfig = {
+    'DEFINES_MODULE' => 'YES',
+    'EXCLUDED_ARCHS[sdk=iphonesimulator*]' => 'i386',
+    # Static-lib symbols are namespaced via the umbrella header; tell
+    # Xcode where to find the module map so `import SankofaUpdaterFFI`
+    # resolves at compile time without bridging-header gymnastics.
+    'SWIFT_INCLUDE_PATHS' => '$(PODS_ROOT)/sankofa_flutter/SankofaUpdaterFFI.xcframework/ios-arm64/Headers',
+  }
   s.swift_version = '5.0'
 end

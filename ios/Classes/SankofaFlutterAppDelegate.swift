@@ -66,8 +66,60 @@ open class SankofaFlutterAppDelegate: FlutterAppDelegate {
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
         configureSankofaFromInfoPlist()
+        Self.initializeUpdater()
         Self.installEngineArgumentInjector()
         return super.application(application, didFinishLaunchingWithOptions: launchOptions)
+    }
+
+    // MARK: - Updater pre-engine init
+    //
+    // Drives `SankofaUpdaterBridge.nativeInit` with the host app's
+    // baseline AOT snapshot path (inside the bundle's App.framework),
+    // a writable data dir under Caches, and a placeholder engine
+    // version that the Phase 5 iOS engine hook will later replace with
+    // the live `flutter::GetFlutterEngineVersion()` value.
+    //
+    // Idempotent — dispatch_once-style gate so multiple AppDelegate
+    // instances (e.g. unit tests creating disposable hosts) don't
+    // race the updater init.
+
+    private static var updaterInitialized: Bool = false
+
+    private static func initializeUpdater() {
+        objc_sync_enter(self)
+        defer { objc_sync_exit(self) }
+        guard !updaterInitialized else { return }
+
+        guard
+            let bundleId = Bundle.main.bundleIdentifier,
+            let appFramework = Bundle.main.privateFrameworksURL?.appendingPathComponent("App.framework"),
+            let cachesDir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
+        else {
+            // Missing standard iOS bundle layout — never expected on a
+            // real device, but bail cleanly rather than crash the host.
+            return
+        }
+
+        let baselinePath = appFramework.appendingPathComponent("App").path
+        let dataDir = cachesDir.appendingPathComponent("sankofa-deploy").path
+        try? FileManager.default.createDirectory(
+            atPath: dataDir,
+            withIntermediateDirectories: true
+        )
+
+        // The Phase 5 iOS engine-fork patch will FFI-export the running
+        // engine's GetFlutterEngineVersion() so we can pass the live
+        // value here. Until then, we use a stable placeholder that
+        // matches the Sankofa fork marker baked into the engine.
+        let engineVersion = "3.41.9+sankofa-1"
+
+        let code = SankofaUpdaterBridge.nativeInit(
+            appId: bundleId,
+            baselineLibappPath: baselinePath,
+            dataDir: dataDir,
+            baselineEngineVersion: engineVersion
+        )
+        updaterInitialized = (code == .ok || code == .recovered)
     }
 
     // MARK: - Info.plist configuration
