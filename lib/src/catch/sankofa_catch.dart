@@ -149,6 +149,48 @@ class SankofaCatch implements SankofaModule {
     }
   }
 
+  /// Self-audit the host's Catch integration. Mirrors Deploy's audit
+  /// shape so the reverse-handshake reporter can batch every module
+  /// into one POST.
+  ///
+  /// Checks the wiring that fails silently in real apps:
+  ///   - hydrate finished (storage worked)
+  ///   - native error handlers installed when host opted in
+  ///   - server has enabled Catch via the handshake
+  ///   - sample rate is sensible
+  Future<ModuleIntegrationStatus> checkIntegration() async {
+    final missing = <String>[];
+    final warnings = <String>[];
+
+    if (!_hydrated) {
+      warnings.add(
+        'Catch cache has not finished hydrating from local storage. Early breadcrumbs may be missing on the first event.',
+      );
+    }
+    if (!_handlersInstalled) {
+      warnings.add(
+        'Native error handlers are not installed — uncaught exceptions and platform errors will not be auto-captured. Construct SankofaCatch with captureUnhandled: true.',
+      );
+    }
+    if (!_enabled) {
+      missing.add(
+        'Catch is disabled by the server-side handshake response. Open Project Settings → Catch in the dashboard or check the org plan tier.',
+      );
+    }
+    if (_errorSampleRate <= 0) {
+      warnings.add(
+        'errorSampleRate is $_errorSampleRate — every captured event will be sampled out. Useful in dev; misleading in prod.',
+      );
+    }
+
+    return ModuleIntegrationStatus(
+      module: SankofaModuleName.catchModule,
+      level: deriveModuleIntegrationLevel(missing),
+      missing: missing,
+      warnings: warnings,
+    );
+  }
+
   // ── Public API ───────────────────────────────────────────────
 
   String captureException(Object error, [Object? stackTrace, CatchCaptureOptions? options]) {

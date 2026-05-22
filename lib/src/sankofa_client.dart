@@ -364,18 +364,42 @@ class Sankofa {
         final status = await deploy.checkIntegration();
         _lastDeployIntegrationStatus = status;
         // Reverse handshake — fire-and-forget POST so the dashboard's
-        // SDK Health page sees this app's integration state. Other
-        // modules will append to the batch as they ship their own
-        // checkIntegration audits. Errors are swallowed inside the
-        // reporter; we wrap in unawaited so a slow network never blocks
-        // the rest of init.
-        unawaited(reportIntegrationStatuses(
-          apiKey: apiKey,
-          serverBaseUri: UriHelper.resolveServerBaseUri(endpoint),
-          statuses: [status],
-          appVersion: appVersion,
-          debug: kDebugMode,
-        ));
+        // SDK Health page sees this app's integration state. Collect
+        // every registered module's audit and ship them as one batch.
+        // Errors stay non-fatal; we wrap in unawaited so a slow network
+        // never blocks the rest of init.
+        unawaited(() async {
+          final batch = <ModuleIntegrationStatus>[status];
+          // Pulse first: register() must run before its audit is
+          // useful. The other modules audit themselves via the Module
+          // Registry — we walk it to pick up every constructed module
+          // (Catch / Switch / Config / Pulse) without coupling this
+          // file to each module's class.
+          for (final mod in SankofaModuleRegistry.instance.installed()) {
+            // Deploy was already audited above; skip to avoid
+            // double-counting.
+            if (mod.name == SankofaModuleName.deploy) continue;
+            try {
+              final dynamic dynMod = mod;
+              final result = dynMod.checkIntegration();
+              if (result is Future<ModuleIntegrationStatus>) {
+                batch.add(await result);
+              } else if (result is ModuleIntegrationStatus) {
+                batch.add(result);
+              }
+            } catch (_) {
+              // Per-module audit errors stay quiet; the next launch
+              // re-runs.
+            }
+          }
+          await reportIntegrationStatuses(
+            apiKey: apiKey,
+            serverBaseUri: UriHelper.resolveServerBaseUri(endpoint),
+            statuses: batch,
+            appVersion: appVersion,
+            debug: kDebugMode,
+          );
+        }());
         if (!status.isFull && kDebugMode) {
           // ignore: avoid_print
           print('');

@@ -103,6 +103,18 @@ class ModuleIntegrationStatus {
   bool get isUsable => level != ModuleIntegrationLevel.broken;
 }
 
+/// Derive a [ModuleIntegrationLevel] from the missing-count, matching the
+/// rule used by the RN + Web + Android + iOS SDKs:
+///
+///   - 0 missing items → full
+///   - 1 missing item  → partial
+///   - 2+              → broken
+ModuleIntegrationLevel deriveModuleIntegrationLevel(List<String> missing) {
+  if (missing.isEmpty) return ModuleIntegrationLevel.full;
+  if (missing.length >= 2) return ModuleIntegrationLevel.broken;
+  return ModuleIntegrationLevel.partial;
+}
+
 /// Interface every pluggable module implements. The Core never imports
 /// concrete module classes — it only talks to them through this shape.
 abstract class SankofaModule {
@@ -162,6 +174,11 @@ class SankofaModuleRegistry {
   /// values were live when this error fired" without the host wiring
   /// closures by hand.
   SankofaModule? get(SankofaModuleName name) => _registered[name];
+
+  /// Returns every constructed module instance. Used by the reverse-
+  /// handshake reporter to walk modules without coupling to each
+  /// concrete class.
+  Iterable<SankofaModule> installed() => _registered.values;
 
   /// Returns the list of module names the app binary actually ships with.
   /// Analytics is always present (it IS the core).

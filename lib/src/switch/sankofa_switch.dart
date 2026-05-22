@@ -80,6 +80,39 @@ class SankofaSwitch implements SankofaModule {
     _fire(diff.changed, diff.removed);
   }
 
+  /// Self-audit the host's Switch integration. Mirrors Deploy + RN.
+  Future<ModuleIntegrationStatus> checkIntegration() async {
+    final missing = <String>[];
+    final warnings = <String>[];
+
+    if (!_hydrated) {
+      warnings.add(
+        'Flag cache has not finished hydrating from SharedPreferences. First getFlag() calls return defaults until hydrate completes.',
+      );
+    }
+    if (_flags.isEmpty && _defaults.isEmpty) {
+      missing.add(
+        'No flags loaded from server and no bundled defaults supplied. Every getFlag(key) will return the inline fallback value.',
+      );
+    } else if (_flags.isEmpty) {
+      warnings.add(
+        'No flags from server yet — handshake may not have completed, or the project has no flags. Defaults will be used.',
+      );
+    }
+    if (_etag.isEmpty) {
+      warnings.add(
+        'No etag stored — the SDK can not short-circuit subsequent handshakes with If-None-Match.',
+      );
+    }
+
+    return ModuleIntegrationStatus(
+      module: SankofaModuleName.switchModule,
+      level: deriveModuleIntegrationLevel(missing),
+      missing: missing,
+      warnings: warnings,
+    );
+  }
+
   // ── Public API ────────────────────────────────────────────────────
 
   /// Returns the boolean value for a flag. Boolean flags return their

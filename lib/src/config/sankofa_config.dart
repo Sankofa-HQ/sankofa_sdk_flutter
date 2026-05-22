@@ -71,6 +71,39 @@ class SankofaConfig implements SankofaModule {
     _fire(diff.changed, diff.removed);
   }
 
+  /// Self-audit the host's Config integration. Mirrors Switch + RN.
+  Future<ModuleIntegrationStatus> checkIntegration() async {
+    final missing = <String>[];
+    final warnings = <String>[];
+
+    if (!_hydrated) {
+      warnings.add(
+        'Config cache has not finished hydrating from SharedPreferences. First get() calls return defaults until hydrate completes.',
+      );
+    }
+    if (_values.isEmpty && _defaults.isEmpty) {
+      missing.add(
+        'No values from server and no bundled defaults supplied. Every get(key, fallback) will return the inline fallback.',
+      );
+    } else if (_values.isEmpty) {
+      warnings.add(
+        'No values from server yet — handshake may not have completed, or the project has no config items. Defaults will be used.',
+      );
+    }
+    if (_etag.isEmpty) {
+      warnings.add(
+        'No etag stored — the SDK can not short-circuit subsequent handshakes with If-None-Match.',
+      );
+    }
+
+    return ModuleIntegrationStatus(
+      module: SankofaModuleName.configModule,
+      level: deriveModuleIntegrationLevel(missing),
+      missing: missing,
+      warnings: warnings,
+    );
+  }
+
   // ── Public API ────────────────────────────────────────────────────
 
   /// Typed lookup. The generic [T] carries the expected type so the

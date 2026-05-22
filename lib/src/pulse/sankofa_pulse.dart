@@ -122,6 +122,42 @@ class SankofaPulse implements SankofaModule {
     await _refreshSurveys();
   }
 
+  /// Self-audit the host's Pulse integration. Most Pulse breakage
+  /// happens at register-time (no API key, host not initialised) — we
+  /// surface those as broken so the dashboard flags them clearly.
+  Future<ModuleIntegrationStatus> checkIntegration() async {
+    final missing = <String>[];
+    final warnings = <String>[];
+
+    if (!_registered) {
+      missing.add(
+        'SankofaPulse.register() has not been called (or returned false). Call register() AFTER Sankofa.instance.init() resolves.',
+      );
+    }
+    if (_client == null) {
+      missing.add(
+        'PulseClient was not constructed — usually means register() ran before the host had an apiKey / endpoint.',
+      );
+    }
+    if (_registered && _cached.isEmpty) {
+      warnings.add(
+        'No surveys cached yet — first refresh may still be in flight, or no surveys are published in the project.',
+      );
+    }
+    if (!_enabled) {
+      warnings.add(
+        'Pulse is disabled by the server handshake. Open Project Settings → Pulse in the dashboard to enable it.',
+      );
+    }
+
+    return ModuleIntegrationStatus(
+      module: SankofaModuleName.pulseModule,
+      level: deriveModuleIntegrationLevel(missing),
+      missing: missing,
+      warnings: warnings,
+    );
+  }
+
   // ── Public reads ──────────────────────────────────────────────────
 
   /// Returns the surveys whose targeting rules pass for the current
