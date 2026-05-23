@@ -11,7 +11,13 @@
 // SankofaUpdaterBridge.swift can just say `import SankofaUpdaterFFI` and
 // call sankofa_updater_init(...) like any other C function.
 
-framework module SankofaUpdaterFFI {
+// Plain `module` (not `framework module`) because the xcframework
+// slices are static archives (libsankofa_updater_ffi.a), not
+// Foo.framework bundles. `framework module` would tell Clang to look
+// for headers at `Foo.framework/Headers/foo.h`; the static-lib layout
+// puts the header directly in the slice's `Headers/` dir alongside
+// this module map, which is what plain `module` resolves.
+module SankofaUpdaterFFI {
     umbrella header "sankofa_updater.h"
     export *
     module * { export * }
