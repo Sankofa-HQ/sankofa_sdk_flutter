@@ -120,6 +120,32 @@ open class SankofaFlutterAppDelegate: FlutterAppDelegate {
             baselineEngineVersion: engineVersion
         )
         updaterInitialized = (code == .ok || code == .recovered)
+
+        // Phase 5 iOS AOT override.
+        //
+        // If the updater has an active OTA patch, register its path
+        // with the Sankofa engine fork's FlutterDartProject hook BEFORE
+        // any FlutterEngine is constructed. The engine consumes this
+        // value the first time FLTDefaultSettingsForBundle runs and
+        // prepends it to `application_library_paths`, so the engine
+        // loads the patched App framework binary instead of the
+        // bundle-default.
+        //
+        // The class method only exists on Sankofa-built Flutter
+        // frameworks (Phase 5 patch). Hosts that haven't completed the
+        // Flutter.framework swap yet are still on vanilla Flutter, so
+        // we guard with responds(to:) — a missing selector means OTA
+        // is silently disabled, never a crash. Matches the Android
+        // pattern where SankofaFlutterActivity's getFlutterShellArgs()
+        // override only takes effect when the customer's APK actually
+        // ships our libflutter.so.
+        if updaterInitialized {
+            let override = SankofaUpdaterBridge.nativeGetLibappPath()
+            let setterSel = NSSelectorFromString("sankofaSetAOTSharedLibraryOverridePath:")
+            if FlutterDartProject.responds(to: setterSel) {
+                _ = (FlutterDartProject.self as AnyObject).perform(setterSel, with: override)
+            }
+        }
     }
 
     // MARK: - Info.plist configuration
