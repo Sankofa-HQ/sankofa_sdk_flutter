@@ -27,7 +27,7 @@
 // and (future) signature checking. The host handles the actual VM
 // call into `loadDynamicModule`.
 
-import 'dart:io' show File;
+import 'dart:io' show File, Platform;
 import 'dart:typed_data';
 
 import 'kbc_envelope.dart';
@@ -77,6 +77,49 @@ class KbcApplyException implements Exception {
       cause == null ? 'KbcApplyException: $message' : 'KbcApplyException: $message (caused by $cause)';
 }
 
+/// ζ — engine compatibility check.
+///
+/// Pulls the running Dart VM version from `Platform.version` (e.g.
+/// `"3.11.5+sankofa-1 (stable) (...) on \"ios_arm64\""`) and compares
+/// against the envelope's `dartVersion` metadata. Refuses to apply a
+/// patch whose KBC was emitted by a different Dart version: KBC
+/// bytecode format is version-sensitive and dispatch tables can shift
+/// between minors. Fail-closed is safer than the alternative — a
+/// silent crash deep inside `Interpreter::Run` with no breadcrumbs.
+///
+/// Also refuses to apply on a non-Sankofa engine: stock Flutter's
+/// `loadDynamicModule` throws `Unsupported operation` (the
+/// `runtime/lib/object.cc:617` `#else` branch), but checking up-front
+/// surfaces the cause cleanly instead of letting the host see a
+/// generic UnsupportedError.
+///
+/// Returns null on success, an error message on failure.
+String? _engineCompatError(Map<String, dynamic> metadata) {
+  final platformVersion = Platform.version;
+  // Stock Flutter has no `+sankofa-` marker in its version string;
+  // refuse to even attempt the apply if it's missing.
+  if (!platformVersion.contains('+sankofa-')) {
+    return 'running engine is not a Sankofa fork build '
+        '(Platform.version = "$platformVersion" — expected to contain '
+        '"+sankofa-N"). KBC patches will not load on stock Flutter.';
+  }
+  // Compare envelope's dartVersion to the engine's Dart minor.
+  // Envelope dartVersion typically comes back as just "3.11.5";
+  // Platform.version is "3.11.5+sankofa-1 (...)". We compare the
+  // leading dotted-numeric prefix only, since the +sankofa-N marker is
+  // engine-fork build identity, not Dart language version.
+  final envelopeDart = metadata['dartVersion']?.toString();
+  if (envelopeDart != null && envelopeDart.isNotEmpty) {
+    final engineDart = platformVersion.split('+').first.split(' ').first;
+    if (envelopeDart != engineDart) {
+      return 'envelope Dart version "$envelopeDart" does not match running '
+          'engine "$engineDart" (Platform.version = "$platformVersion"). '
+          'Rebuild the patch with the same Dart SDK the engine ships.';
+    }
+  }
+  return null;
+}
+
 /// Internal apply pipeline. Exposed publicly via SankofaDeploy.
 Future<KbcPatchResult> applyKbcEnvelope(
   Uint8List envelopeBytes, {
@@ -114,6 +157,13 @@ Future<KbcPatchResult> applyKbcEnvelope(
     throw KbcApplyException(
       'envelope wraps non-KBC payload (magic mismatch in inner payload)',
     );
+  }
+
+  // ζ — engine version pinning. Refuse mismatch BEFORE handing bytes
+  // to the loader. Cleaner failure mode than the loader's deep crash.
+  final compatErr = _engineCompatError(parsed.metadata);
+  if (compatErr != null) {
+    throw KbcApplyException(compatErr);
   }
 
   Object? returnValue;
