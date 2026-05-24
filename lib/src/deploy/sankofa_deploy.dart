@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart';
 import '../core/module_registry.dart';
 import 'deploy_config.dart';
 import 'deploy_platform_interface.dart';
+import 'kbc_fetch.dart';
 import 'kbc_loader.dart';
 import 'update_status.dart';
 
@@ -219,6 +220,62 @@ class SankofaDeploy implements SankofaModule {
   }) {
     _assertReady();
     return applyKbcEnvelopeFromFile(path, loader: loader);
+  }
+
+  /// η v1: in-app fetch + apply for iOS Path C.
+  ///
+  /// Replaces the manual `xcrun devicectl device copy to` workflow
+  /// with a single in-app call. Hits the Sankofa server's
+  /// `/api/deploy/check` endpoint, downloads the latest matching
+  /// envelope, verifies sha-256, persists to
+  /// `<Documents>/sankofa-deploy/patches/active/patch.skdp`, and
+  /// applies via [loader].
+  ///
+  /// The canonical wiring from a host app:
+  ///
+  /// ```dart
+  /// import 'package:dynamic_modules/dynamic_modules.dart';
+  ///
+  /// final result = await Sankofa.deploy!.fetchAndApplyKbcPatch(
+  ///   endpoint: 'http://172.20.10.8:8080',  // Mac's LAN IP in dev
+  ///   apiKey: '<test or live SDK key>',
+  ///   appVersion: '1.0.0',
+  ///   engineVersion: '3.41.9+sankofa-1',
+  ///   distinctId: await getOrCreateDistinctId(),
+  ///   loader: loadModuleFromBytes,
+  /// );
+  /// if (result.hasUpdate) {
+  ///   print('patched: ${result.applied?.returnValue}');
+  /// }
+  /// ```
+  ///
+  /// Throws [KbcFetchException] on any HTTP / sha-mismatch / apply
+  /// failure. The exception message names the most likely cause.
+  Future<KbcFetchResult> fetchAndApplyKbcPatch({
+    required String endpoint,
+    required String apiKey,
+    required String appVersion,
+    required String engineVersion,
+    required String distinctId,
+    required KbcLoaderFn loader,
+    String platform = 'ios',
+    String? currentLabel,
+    bool persistToDisk = true,
+    Duration timeout = const Duration(seconds: 30),
+  }) {
+    _assertReady();
+    return fetchAndApplyKbcPatch(
+      endpoint: endpoint,
+      apiKey: apiKey,
+      appVersion: appVersion,
+      engineVersion: engineVersion,
+      distinctId: distinctId,
+      loader: loader,
+      platform: platform,
+      currentLabel: currentLabel,
+      persistToDisk: persistToDisk,
+      timeout: timeout,
+    );
   }
 
   /// Tear down the platform plugin. Called by `Sankofa.dispose()`;

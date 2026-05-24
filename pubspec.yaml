@@ -29,6 +29,14 @@ dependencies:
   # uses libapp.so binary-diff and skips this entirely.
   crypto: ^3.0.0
 
+  # η v1 — Sankofa.deploy.fetchAndApplyKbcPatch needs the iOS app's
+  # Documents directory so it can stage the downloaded envelope at
+  # the conventional `<Documents>/sankofa-deploy/patches/active/
+  # patch.skdp` path that the on-device demo + cold-boot apply read
+  # from. path_provider is already an indirect dep of most Flutter
+  # apps; declaring it here makes the SDK self-contained.
+  path_provider: ^2.1.0
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

@@ -43,6 +43,8 @@ export 'src/deploy/kbc_loader.dart'
         KbcApplyException,
         applyKbcEnvelope,
         applyKbcEnvelopeFromFile;
+export 'src/deploy/kbc_fetch.dart'
+    show KbcFetchResult, KbcFetchException, fetchAndApplyKbcPatch;
 
 // Module integration status — let hosts read the audit result
 // (e.g. to show their own UI when integration is incomplete).
