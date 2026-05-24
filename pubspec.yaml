@@ -21,6 +21,14 @@ dependencies:
   shared_preferences: ^2.5.4
   uuid: ^4.5.3
 
+  # β.4 — sha-256 verification for SANKOFA_KBC_ENVELOPE patches loaded
+  # via Sankofa.deploy.applyKbcPatchFromBytes / applyKbcPatchFromFile.
+  # `package:crypto` is a Dart team-maintained pub.dev package, no
+  # transitive native deps, < 30 kB. Required only for iOS Path C
+  # (KBC interpreter OTA); harmless on Android baseline path which
+  # uses libapp.so binary-diff and skips this entirely.
+  crypto: ^3.0.0
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

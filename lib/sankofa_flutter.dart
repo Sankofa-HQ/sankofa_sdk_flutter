@@ -28,6 +28,21 @@ export 'src/config/item_decision.dart'
 export 'src/deploy/sankofa_deploy.dart' show SankofaDeploy;
 export 'src/deploy/deploy_config.dart' show SankofaDeployOptions;
 export 'src/deploy/update_status.dart' show UpdateStatus;
+// β.3 + ε + β.4 + η — Sankofa Deploy: Flutter Code KBC patch apply API (iOS Path C).
+export 'src/deploy/kbc_envelope.dart'
+    show
+        ParsedKbcEnvelope,
+        KbcSigAlg,
+        KbcEnvelopeFormatException,
+        parseKbcEnvelope,
+        envelopeVersion;
+export 'src/deploy/kbc_loader.dart'
+    show
+        KbcPatchResult,
+        KbcLoaderFn,
+        KbcApplyException,
+        applyKbcEnvelope,
+        applyKbcEnvelopeFromFile;
 
 // Module integration status — let hosts read the audit result
 // (e.g. to show their own UI when integration is incomplete).

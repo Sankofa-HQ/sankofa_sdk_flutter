@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart';
 import '../core/module_registry.dart';
 import 'deploy_config.dart';
 import 'deploy_platform_interface.dart';
+import 'kbc_loader.dart';
 import 'update_status.dart';
 
 /// Sankofa Deploy — Flutter Code OTA updates.
@@ -160,6 +161,64 @@ class SankofaDeploy implements SankofaModule {
   Future<void> disableCurrentPatch() {
     _assertReady();
     return SankofaDeployPlatform.instance.disableCurrentPatch();
+  }
+
+  /// β.3 + ε + β.4 + η: apply a Sankofa Deploy: Flutter Code KBC patch.
+  ///
+  /// Pass a [SANKOFA_KBC_ENVELOPE] (`.skdp`) buffer plus a [loader]
+  /// callback that calls the Dart VM's `loadDynamicModule`. The
+  /// canonical wiring (from a host app's pubspec with
+  /// `dynamic_modules` as a path-dep on `pkg/dynamic_modules` from our
+  /// Dart SDK fork) is:
+  ///
+  /// ```dart
+  /// import 'package:dynamic_modules/dynamic_modules.dart';
+  ///
+  /// final result = await Sankofa.deploy!.applyKbcPatchFromBytes(
+  ///   envelopeBytes,
+  ///   loader: loadModuleFromBytes,
+  /// );
+  /// ```
+  ///
+  /// The SDK:
+  ///   * parses the envelope (`magic SKDP`, version 1, length-prefixed
+  ///     header + JSON metadata + KBC payload + signature trailer)
+  ///   * verifies the payload SHA-256 against the carried digest —
+  ///     **fail-closed on mismatch**, the loader is never called
+  ///   * sanity-checks the inner KBC magic (`DBC3` = 33 43 42 44)
+  ///   * hands the verified KBC bytes to [loader]
+  ///   * returns the dyn-module entry-point's return value plus the
+  ///     envelope metadata in a [KbcPatchResult]
+  ///
+  /// Throws [KbcApplyException] on any pre-load failure. Throws via
+  /// the loader on engine-side issues (e.g. running a stock Flutter
+  /// engine that wasn't built with `dart_dynamic_modules=true` → "Loading
+  /// of dynamic modules is not supported"). The exception message
+  /// names the most likely cause to keep debugging short.
+  ///
+  /// This is the iOS Path C ship surface (β.3 proved on iPhone
+  /// 2026-05-24). Android baseline OTA still uses the Phase 5
+  /// libapp.so binary-diff route — see [checkForUpdate].
+  Future<KbcPatchResult> applyKbcPatchFromBytes(
+    Uint8List envelopeBytes, {
+    required KbcLoaderFn loader,
+  }) {
+    _assertReady();
+    return applyKbcEnvelope(envelopeBytes, loader: loader);
+  }
+
+  /// Convenience wrapper around [applyKbcPatchFromBytes]. Reads the
+  /// envelope file off disk, then dispatches as above.
+  ///
+  /// The canonical on-device path is
+  /// `<App Documents>/sankofa-deploy/patches/active/patch.skdp` — the
+  /// SDK doesn't enforce this so apps can stage patches wherever fits.
+  Future<KbcPatchResult> applyKbcPatchFromFile(
+    String path, {
+    required KbcLoaderFn loader,
+  }) {
+    _assertReady();
+    return applyKbcEnvelopeFromFile(path, loader: loader);
   }
 
   /// Tear down the platform plugin. Called by `Sankofa.dispose()`;
