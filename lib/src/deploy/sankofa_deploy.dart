@@ -3,8 +3,17 @@ import 'package:flutter/foundation.dart';
 import '../core/module_registry.dart';
 import 'deploy_config.dart';
 import 'deploy_platform_interface.dart';
-import 'kbc_fetch.dart';
-import 'kbc_loader.dart';
+// Prefix-imported so the SankofaDeploy instance methods named
+// applyKbcPatchFromBytes / applyKbcPatchFromFile / fetchAndApplyKbcPatch
+// don't shadow the top-level helpers they delegate to — without the
+// prefix, calling `applyKbcEnvelope(...)` inside an instance method
+// resolves to `this.applyKbcEnvelope(...)` and recurses infinitely
+// (proven by hello_sankofa's "Unexpected error: Stack Overflow"
+// after the η-polish prefer-SDK-path wiring landed).
+import 'kbc_fetch.dart' as kbc_fetch;
+import 'kbc_loader.dart' as kbc_loader;
+import 'kbc_loader.dart' show KbcPatchResult, KbcLoaderFn;
+import 'kbc_fetch.dart' show KbcFetchResult;
 import 'update_status.dart';
 
 /// Sankofa Deploy — Flutter Code OTA updates.
@@ -83,6 +92,24 @@ class SankofaDeploy implements SankofaModule {
 
   /// Internal hook used by `Sankofa.init` — DO NOT call directly. The
   /// per-product `enableDeploy` flag triggers this. Idempotent.
+  ///
+  /// **Native platform plugin init is best-effort.** When the platform
+  /// plugin's initialize() throws (e.g. on iOS Path C where the native
+  /// half of the libapp.so binary-diff updater doesn't exist),
+  /// `_instance` is still set + `_ready` is left false. Pure-Dart
+  /// methods (the KBC patch apply pipeline — `applyKbcPatchFromBytes`,
+  /// `applyKbcPatchFromFile`, `fetchAndApplyKbcPatch`) don't gate on
+  /// `_ready` and remain usable. Methods that DO require the platform
+  /// plugin (Android baseline OTA — `checkForUpdate`, `notifyAppReady`,
+  /// `reportCrash`, `disableCurrentPatch`, `getActiveVersion`,
+  /// `getCurrentLibappPath`) throw via `_assertReady()` with a clear
+  /// message explaining the platform is unavailable.
+  ///
+  /// Before η polish (2026-05-24): platform-init failure inside the
+  /// `unawaited()` wrapper that calls this function would silently
+  /// leave `_instance == null` and `Sankofa.deploy` returned null —
+  /// hello_sankofa hit this on iOS, fell back to the standalone
+  /// `applyKbcEnvelopeFromFile` helper.
   static Future<SankofaDeploy> initInternal({
     required String apiKey,
     required String endpoint,
@@ -97,17 +124,37 @@ class SankofaDeploy implements SankofaModule {
     // host-side `enableDeploy: true` is just intent.
     SankofaModuleRegistry.instance.register(deploy);
 
-    await SankofaDeployPlatform.instance.initialize(
-      apiKey: apiKey,
-      endpoint: endpoint,
-      options: options,
-    );
-    deploy._ready = true;
+    // Publish the instance EAGERLY so a slow / failing platform plugin
+    // init never strands `Sankofa.deploy` at null. The Path C methods
+    // are pure Dart and don't need the native plugin; the Android
+    // methods gate on `_ready` and throw a clear message when it's
+    // false. Either way `Sankofa.deploy` is the canonical entry point.
     _instance = deploy;
 
-    if (options.autoCheckOnStartup) {
+    try {
+      await SankofaDeployPlatform.instance.initialize(
+        apiKey: apiKey,
+        endpoint: endpoint,
+        options: options,
+      );
+      deploy._ready = true;
+    } catch (err, st) {
+      if (kDebugMode) {
+        debugPrint(
+          '[Sankofa.deploy] platform plugin init failed — '
+          'Path C (KBC) pipeline still works; Android baseline methods '
+          'will throw _assertReady until the plugin succeeds: $err\n$st',
+        );
+      }
+      // Intentionally leave _ready=false. Path C methods don't gate on it.
+    }
+
+    if (options.autoCheckOnStartup && deploy._ready) {
       // Fire-and-forget. Errors flow into the platform's logger and
       // the next checkForUpdate() call will surface the state.
+      // Skip on iOS Path C (where _ready stays false) because
+      // checkForUpdate hits the libapp.so binary-diff endpoint, not
+      // the KBC pipeline — wrong path for iOS Path C apps.
       unawaited(deploy.checkForUpdate());
     }
     return deploy;
@@ -204,8 +251,10 @@ class SankofaDeploy implements SankofaModule {
     Uint8List envelopeBytes, {
     required KbcLoaderFn loader,
   }) {
-    _assertReady();
-    return applyKbcEnvelope(envelopeBytes, loader: loader);
+    // Path C is pure Dart — no platform plugin needed. Do NOT call
+    // _assertReady(): on iOS the platform plugin's libapp.so updater
+    // doesn't exist, so _ready stays false even though Path C works.
+    return kbc_loader.applyKbcEnvelope(envelopeBytes, loader: loader);
   }
 
   /// Convenience wrapper around [applyKbcPatchFromBytes]. Reads the
@@ -218,8 +267,8 @@ class SankofaDeploy implements SankofaModule {
     String path, {
     required KbcLoaderFn loader,
   }) {
-    _assertReady();
-    return applyKbcEnvelopeFromFile(path, loader: loader);
+    // Path C is pure Dart — see applyKbcPatchFromBytes above.
+    return kbc_loader.applyKbcEnvelopeFromFile(path, loader: loader);
   }
 
   /// η v1: in-app fetch + apply for iOS Path C.
@@ -263,8 +312,9 @@ class SankofaDeploy implements SankofaModule {
     bool persistToDisk = true,
     Duration timeout = const Duration(seconds: 30),
   }) {
-    _assertReady();
-    return fetchAndApplyKbcPatch(
+    // Path C is pure Dart — see applyKbcPatchFromBytes above.
+    // Prefix-call to avoid infinite recursion on the instance method.
+    return kbc_fetch.fetchAndApplyKbcPatch(
       endpoint: endpoint,
       apiKey: apiKey,
       appVersion: appVersion,
@@ -371,8 +421,14 @@ class SankofaDeploy implements SankofaModule {
   void _assertReady() {
     if (!_ready) {
       throw StateError(
-        'Sankofa.deploy used before initialize completed. Call '
-        '`await Sankofa.init(apiKey: ..., enableDeploy: true)` first.',
+        'Sankofa.deploy: native platform plugin is not ready. Either:\n'
+        '  • `Sankofa.init(apiKey: ..., enableDeploy: true)` was never '
+        'called / has not yet completed, or\n'
+        '  • the platform plugin\'s initialize() threw — common on iOS '
+        'Path C apps where the native libapp.so updater half does NOT '
+        'exist. Path C apps should use applyKbcPatchFromBytes / '
+        'applyKbcPatchFromFile / fetchAndApplyKbcPatch instead, which '
+        'do NOT require the platform plugin.',
       );
     }
   }
