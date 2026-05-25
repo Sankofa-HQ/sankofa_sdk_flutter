@@ -93,15 +93,30 @@ class KbcApplyException implements Exception {
 /// surfaces the cause cleanly instead of letting the host see a
 /// generic UnsupportedError.
 ///
+/// Build-time bypass. Set `--dart-define=SANKOFA_SKIP_ENGINE_CHECK=1` to
+/// skip the Platform.version sankofa-marker check. Useful while the Dart
+/// SDK fork doesn't yet stamp `+sankofa-N` into `tools/VERSION` — the
+/// Flutter engine binary IS forked (verified via FLUTTER_ENGINE_VERSION
+/// in Flutter.framework), but Platform.version reflects the bundled
+/// Dart SDK version, which is unmodified.
+const bool _skipEngineCheck = bool.fromEnvironment(
+  'SANKOFA_SKIP_ENGINE_CHECK',
+  defaultValue: false,
+);
+
 /// Returns null on success, an error message on failure.
 String? _engineCompatError(Map<String, dynamic> metadata) {
   final platformVersion = Platform.version;
   // Stock Flutter has no `+sankofa-` marker in its version string;
-  // refuse to even attempt the apply if it's missing.
-  if (!platformVersion.contains('+sankofa-')) {
+  // refuse to even attempt the apply if it's missing — unless the
+  // SANKOFA_SKIP_ENGINE_CHECK dart-define is set (dev/test escape hatch
+  // while the Dart SDK fork hasn't stamped its version yet).
+  if (!_skipEngineCheck && !platformVersion.contains('+sankofa-')) {
     return 'running engine is not a Sankofa fork build '
         '(Platform.version = "$platformVersion" — expected to contain '
-        '"+sankofa-N"). KBC patches will not load on stock Flutter.';
+        '"+sankofa-N"). KBC patches will not load on stock Flutter. '
+        'If your engine IS forked but Dart version is unstamped, rebuild '
+        'with --dart-define=SANKOFA_SKIP_ENGINE_CHECK=1.';
   }
   // Compare envelope's dartVersion to the engine's Dart minor.
   // Envelope dartVersion typically comes back as just "3.11.5";
