@@ -29,6 +29,14 @@ dependencies:
   # uses libapp.so binary-diff and skips this entirely.
   crypto: ^3.0.0
 
+  # v2 envelope MVP — Ed25519 signature verification on downloaded KBC
+  # envelopes. Producer-side (CLI) signs the envelope with the project's
+  # private key; SDK-side verifies against the public key embedded at
+  # app init via Sankofa.initialize(deploySigningPubkey: '...').
+  # `cryptography` is a Dart team-aligned pub.dev package with pure-Dart
+  # Ed25519 implementation (no native bindings), ~80 kB.
+  cryptography: ^2.7.0
+
   # η v1 — Sankofa.deploy.fetchAndApplyKbcPatch needs the iOS app's
   # Documents directory so it can stage the downloaded envelope at
   # the conventional `<Documents>/sankofa-deploy/patches/active/

@@ -136,9 +136,15 @@ String? _engineCompatError(Map<String, dynamic> metadata) {
 }
 
 /// Internal apply pipeline. Exposed publicly via SankofaDeploy.
+///
+/// [signingPubkeyB64], when non-null, makes signature verification
+/// mandatory. The envelope MUST be sig_alg=ed25519 AND its signature
+/// MUST verify against this 32-byte Ed25519 public key (base64). Pass
+/// null only when the app deliberately opts out (dev / unsigned mode).
 Future<KbcPatchResult> applyKbcEnvelope(
   Uint8List envelopeBytes, {
   required KbcLoaderFn loader,
+  String? signingPubkeyB64,
 }) async {
   ParsedKbcEnvelope parsed;
   try {
@@ -152,12 +158,38 @@ Future<KbcPatchResult> applyKbcEnvelope(
       'envelope payload sha-256 mismatch — patch is tampered or corrupt',
     );
   }
-  if (parsed.sigAlg != KbcSigAlg.unsigned) {
-    // v1 only supports unsigned. When v2 + signature verification lands
-    // this will dispatch to the appropriate verifier.
+
+  // v2 MVP: Ed25519 signature verification. Three cases:
+  //   1. App embedded a pubkey → require signed envelope AND valid signature.
+  //   2. App embedded no pubkey + envelope is unsigned → allow (legacy).
+  //   3. App embedded no pubkey + envelope is signed → allow but log
+  //      (envelope is over-secured for this app; not a security issue).
+  if (signingPubkeyB64 != null && signingPubkeyB64.isNotEmpty) {
+    if (parsed.sigAlg != KbcSigAlg.ed25519) {
+      throw KbcApplyException(
+        'envelope is unsigned but app requires Ed25519-signed patches. '
+        'Rebuild the patch with `sankofa keys generate` configured for '
+        'project ${parsed.metadata['projectId'] ?? '<unknown>'}.',
+      );
+    }
+    final ok = await verifyKbcEnvelopeSignature(
+      envelopeBytes: envelopeBytes,
+      parsed: parsed,
+      pubkeyB64: signingPubkeyB64,
+    );
+    if (!ok) {
+      throw KbcApplyException(
+        'envelope Ed25519 signature did not verify against the app\'s '
+        'embedded pubkey. Either the patch was tampered with in transit, '
+        'or the signing key changed without rebuilding the host app.',
+      );
+    }
+  } else if (parsed.sigAlg != KbcSigAlg.unsigned &&
+      parsed.sigAlg != KbcSigAlg.ed25519) {
+    // Unknown algorithm — parser would already throw on a value outside
+    // the enum, so this only fires on a future v3+ alg we don't grok.
     throw KbcApplyException(
-      'envelope signature algorithm ${parsed.sigAlg} not supported by this SDK '
-      '(parser handles v1 unsigned only).',
+      'envelope signature algorithm ${parsed.sigAlg} not supported by this SDK.',
     );
   }
 
@@ -206,11 +238,12 @@ Future<KbcPatchResult> applyKbcEnvelope(
 Future<KbcPatchResult> applyKbcEnvelopeFromFile(
   String path, {
   required KbcLoaderFn loader,
+  String? signingPubkeyB64,
 }) async {
   final file = File(path);
   if (!file.existsSync()) {
     throw KbcApplyException('envelope file not found: $path');
   }
   final bytes = await file.readAsBytes();
-  return applyKbcEnvelope(bytes, loader: loader);
+  return applyKbcEnvelope(bytes, loader: loader, signingPubkeyB64: signingPubkeyB64);
 }

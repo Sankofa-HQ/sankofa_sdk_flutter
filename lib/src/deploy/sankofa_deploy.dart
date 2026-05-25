@@ -254,7 +254,11 @@ class SankofaDeploy implements SankofaModule {
     // Path C is pure Dart — no platform plugin needed. Do NOT call
     // _assertReady(): on iOS the platform plugin's libapp.so updater
     // doesn't exist, so _ready stays false even though Path C works.
-    return kbc_loader.applyKbcEnvelope(envelopeBytes, loader: loader);
+    return kbc_loader.applyKbcEnvelope(
+      envelopeBytes,
+      loader: loader,
+      signingPubkeyB64: options.signingPubkeyB64,
+    );
   }
 
   /// Convenience wrapper around [applyKbcPatchFromBytes]. Reads the
@@ -268,7 +272,11 @@ class SankofaDeploy implements SankofaModule {
     required KbcLoaderFn loader,
   }) {
     // Path C is pure Dart — see applyKbcPatchFromBytes above.
-    return kbc_loader.applyKbcEnvelopeFromFile(path, loader: loader);
+    return kbc_loader.applyKbcEnvelopeFromFile(
+      path,
+      loader: loader,
+      signingPubkeyB64: options.signingPubkeyB64,
+    );
   }
 
   /// η v1: in-app fetch + apply for iOS Path C.
@@ -325,6 +333,7 @@ class SankofaDeploy implements SankofaModule {
       currentLabel: currentLabel,
       persistToDisk: persistToDisk,
       timeout: timeout,
+      signingPubkeyB64: options.signingPubkeyB64,
     );
   }
 

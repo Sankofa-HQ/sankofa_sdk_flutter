@@ -31,10 +31,11 @@
 // either side can be evolved independently as long as the spec moves
 // together.
 
-import 'dart:convert' show jsonDecode, utf8;
+import 'dart:convert' show base64, jsonDecode, utf8;
 import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart' show sha256;
+import 'package:cryptography/cryptography.dart' show Ed25519, SimplePublicKey, KeyPairType, Signature;
 
 const int envelopeVersion = 1;
 const int _headerSize = 52;
@@ -194,6 +195,52 @@ ParsedKbcEnvelope parseKbcEnvelope(Uint8List input) {
     payloadShaValid: payloadShaValid,
     totalSize: sigEnd,
   );
+}
+
+/// Verify the Ed25519 signature carried in the envelope trailer against
+/// a 32-byte Ed25519 public key. Returns true iff the signature is valid
+/// over bytes [0..trailerOffset) of the original envelope buffer.
+///
+/// MUST be called with the raw bytes of the envelope file (not the
+/// parsed view), since the parser doesn't retain the original buffer.
+/// Pass `pubkeyB64` as standard base64 of the 32-byte raw point — same
+/// format `sankofa keys generate` emits.
+///
+/// Returns false on any failure (wrong sig_alg, malformed pubkey,
+/// signature mismatch) — never throws so callers can fail-closed
+/// without try/catch noise.
+Future<bool> verifyKbcEnvelopeSignature({
+  required Uint8List envelopeBytes,
+  required ParsedKbcEnvelope parsed,
+  required String pubkeyB64,
+}) async {
+  if (parsed.sigAlg != KbcSigAlg.ed25519) return false;
+  if (parsed.sigBytes.length != 64) return false;
+  final Uint8List rawPub;
+  try {
+    // Tolerate missing trailing `=` padding — some sources strip it.
+    final trimmed = pubkeyB64.trim();
+    final padded = trimmed.padRight((trimmed.length + 3) & ~3, '=');
+    rawPub = base64.decode(padded);
+  } catch (_) {
+    return false;
+  }
+  if (rawPub.length != 32) return false;
+  // The signature covers everything before the trailer. trailerOffset =
+  // totalSize - (4 fixed trailer bytes + sigBytes.length). We don't store
+  // trailerOffset on ParsedKbcEnvelope, so recompute from totalSize.
+  final trailerOffset = parsed.totalSize - 4 - parsed.sigBytes.length;
+  if (trailerOffset < 0 || trailerOffset > envelopeBytes.length) return false;
+  final signedBytes = Uint8List.sublistView(envelopeBytes, 0, trailerOffset);
+
+  final ed = Ed25519();
+  final pubKey = SimplePublicKey(rawPub, type: KeyPairType.ed25519);
+  final signature = Signature(parsed.sigBytes, publicKey: pubKey);
+  try {
+    return await ed.verify(signedBytes, signature: signature);
+  } catch (_) {
+    return false;
+  }
 }
 
 bool _bytesEqual(Uint8List a, Uint8List b) {

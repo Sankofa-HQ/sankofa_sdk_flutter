@@ -127,6 +127,7 @@ Future<KbcFetchResult> fetchAndApplyKbcPatch({
   String? currentLabel,
   bool persistToDisk = true,
   Duration timeout = const Duration(seconds: 30),
+  String? signingPubkeyB64,
 }) async {
   final base = endpoint.endsWith('/')
       ? endpoint.substring(0, endpoint.length - 1)
@@ -244,6 +245,7 @@ Future<KbcFetchResult> fetchAndApplyKbcPatch({
     applied = await applyKbcEnvelope(
       Uint8List.fromList(bytes),
       loader: loader,
+      signingPubkeyB64: signingPubkeyB64,
     );
   } on KbcApplyException catch (err) {
     throw KbcFetchException(
