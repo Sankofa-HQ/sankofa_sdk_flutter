@@ -2,6 +2,7 @@ import 'dart:io' show File;
 
 import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../core/module_registry.dart';
 import 'deploy_config.dart';
@@ -14,11 +15,69 @@ import 'kbc_loader.dart' show KbcApplyException;
 // resolves to `this.applyKbcEnvelope(...)` and recurses infinitely
 // (proven by hello_sankofa's "Unexpected error: Stack Overflow"
 // after the η-polish prefer-SDK-path wiring landed).
+import 'kbc_envelope.dart' show parseKbcEnvelope, KbcSigAlg;
 import 'kbc_fetch.dart' as kbc_fetch;
 import 'kbc_loader.dart' as kbc_loader;
 import 'kbc_loader.dart' show KbcPatchResult, KbcLoaderFn;
 import 'kbc_fetch.dart' show KbcFetchResult;
 import 'update_status.dart';
+
+/// Read-only view of a KBC patch staged on disk — what
+/// [SankofaDeploy.getStagedKbcPatchInfo] returns. Lets dashboards /
+/// support / debug screens surface which patch a device is on without
+/// re-running the interpreter.
+class KbcStagedPatchInfo {
+  const KbcStagedPatchInfo({
+    required this.path,
+    required this.sizeBytes,
+    required this.modifiedAt,
+    required this.label,
+    required this.engineCommit,
+    required this.dartVersion,
+    required this.targetBinaryVersion,
+    required this.signed,
+    this.parseError = false,
+  });
+
+  /// Absolute on-device path of the staged envelope.
+  final String path;
+
+  /// envelope file size in bytes (sha-256 NOT recomputed — that's a
+  /// full [applyKbcEnvelope] call's job).
+  final int sizeBytes;
+
+  /// When the envelope file was last written (= when the most recent
+  /// fetch + persist happened).
+  final DateTime modifiedAt;
+
+  /// Producer-set patch label from envelope metadata (e.g.
+  /// `tier-b-v2-signed-1`). Null when metadata is missing or the
+  /// envelope failed to parse.
+  final String? label;
+
+  /// Producer-set Sankofa engine fork commit. Useful for rolling
+  /// "which engine revision shipped this patch?" up to dashboards.
+  final String? engineCommit;
+
+  /// Dart SDK version the patch was built against (e.g. `3.11.5`).
+  /// Must match the engine's Platform.version minor for apply to
+  /// succeed; ζ.1 enforces this.
+  final String? dartVersion;
+
+  /// Host app binary version the patch is bound to (e.g. `1.0.0`).
+  final String? targetBinaryVersion;
+
+  /// True iff the envelope carries an Ed25519 signature in the trailer.
+  /// (Whether that signature would VERIFY against the host's known
+  /// pubkeys is a separate question — call [applyKbcPatchFromBytes] or
+  /// [tryApplyStagedKbcPatch] to actually run the check.)
+  final bool signed;
+
+  /// True when the envelope on disk failed to parse — the fields above
+  /// are best-effort placeholders. Indicates the patch is unusable;
+  /// the host should delete it and fall back to baseline.
+  final bool parseError;
+}
 
 /// Sankofa Deploy — Flutter Code OTA updates.
 ///
@@ -392,6 +451,30 @@ class SankofaDeploy implements SankofaModule {
     );
   }
 
+  // ── Rollback safety (Shorebird-pattern) ─────────────────────────────
+  //
+  // Every cold-boot apply increments _kbcBootCounterKey by 1; the host
+  // calls [notifyKbcPatchReady] from its first-frame callback to reset
+  // it. If the count crosses [kbcRollbackThreshold] without notify
+  // landing, the patch is auto-disabled (file moved to
+  // patch.skdp.disabled-<timestamp>) and the next boot falls back to
+  // baseline. Without this, one bad patch crash-loops every device
+  // forever — the SDK's job is to never let that happen.
+  //
+  // The threshold is intentionally low (3) — a real boot crash usually
+  // surfaces in <1s, well before any reasonable splash screen would
+  // finish, so 3 crashes feels like "definitely broken" without being
+  // chatty enough to trigger on a single transient native-init hiccup.
+
+  static const String _kbcBootCounterKey = 'sankofa.deploy.kbc.boot_counter';
+  static const String _kbcLastDisabledKey = 'sankofa.deploy.kbc.last_disabled_label';
+
+  /// Max consecutive boots that may apply the staged patch without
+  /// [notifyKbcPatchReady] being called before we disable it. Hosts can
+  /// override per-app by reading the staged-file path off
+  /// [SankofaDeployOptions] (not yet plumbed — file an issue if needed).
+  static const int kbcRollbackThreshold = 3;
+
   /// Look for a KBC patch that a previous session staged on disk and
   /// apply it now, before [runApp]. Returns the apply result, or null
   /// if no patch was staged (or the staged patch is invalid).
@@ -434,6 +517,46 @@ class SankofaDeploy implements SankofaModule {
     final patchPath =
         '${docsDir.path}/sankofa-deploy/patches/active/patch.skdp';
     if (!File(patchPath).existsSync()) return null;
+
+    // Rollback gate: if the previous N boots failed to reach
+    // notifyKbcPatchReady, the staged patch is presumed bad. Move it
+    // aside so future boots fall back to baseline + record which label
+    // got disabled so dashboards / support can correlate.
+    final prefs = await SharedPreferences.getInstance();
+    final bootCount = (prefs.getInt(_kbcBootCounterKey) ?? 0) + 1;
+    if (bootCount > kbcRollbackThreshold) {
+      // Best-effort: record the label so consumeLastAutoDisabledPatchLabel
+      // can surface it later. Parse-only — no apply, no loader call.
+      try {
+        final bytes = await File(patchPath).readAsBytes();
+        final parsed = parseKbcEnvelope(bytes);
+        final lbl = parsed.metadata['label'];
+        if (lbl is String && lbl.isNotEmpty) {
+          await prefs.setString(_kbcLastDisabledKey, lbl);
+        }
+      } catch (_) {
+        // Parse failed too — the envelope is wedged in a way the
+        // rollback marker can't help with. Move on.
+      }
+      try {
+        final disabledPath =
+            '${docsDir.path}/sankofa-deploy/patches/active/patch.skdp.disabled-${DateTime.now().millisecondsSinceEpoch}';
+        await File(patchPath).rename(disabledPath);
+        if (kDebugMode) {
+          debugPrint(
+            '[Sankofa.deploy] AUTO-ROLLBACK: staged patch crashed $bootCount consecutive boots; '
+            'moved to $disabledPath. Booting baseline.',
+          );
+        }
+      } catch (_) {
+        // Rename failed — disk full or permission. Still bail out of
+        // applying; don't keep crash-looping.
+      }
+      await prefs.remove(_kbcBootCounterKey);
+      return null;
+    }
+    await prefs.setInt(_kbcBootCounterKey, bootCount);
+
     try {
       return await kbc_loader.applyKbcEnvelopeFromFile(
         patchPath,
@@ -454,6 +577,86 @@ class SankofaDeploy implements SankofaModule {
         );
       }
       return null;
+    }
+  }
+
+  /// Reset the rollback boot-counter — call this from the host's
+  /// first-frame callback (or any "the app survived initial render"
+  /// signal). Without this call, a bad patch will crash-loop the app
+  /// until [kbcRollbackThreshold] boots, then auto-disable itself.
+  ///
+  /// Typical wiring:
+  ///
+  /// ```dart
+  /// WidgetsBinding.instance.addPostFrameCallback((_) {
+  ///   Sankofa.instance.deploy?.notifyKbcPatchReady();
+  /// });
+  /// ```
+  ///
+  /// Idempotent — calling twice in one boot is harmless. Returns the
+  /// boot count that was reset, mostly useful for telemetry / tests.
+  Future<int> notifyKbcPatchReady() async {
+    final prefs = await SharedPreferences.getInstance();
+    final count = prefs.getInt(_kbcBootCounterKey) ?? 0;
+    await prefs.remove(_kbcBootCounterKey);
+    return count;
+  }
+
+  /// Returns the label of the most recently auto-disabled patch (and
+  /// clears the marker so next call returns null). Dashboards can show
+  /// "we rolled back release X for you" the next time the app phones
+  /// home. Empty string when no rollback has happened.
+  Future<String?> consumeLastAutoDisabledPatchLabel() async {
+    final prefs = await SharedPreferences.getInstance();
+    final label = prefs.getString(_kbcLastDisabledKey);
+    if (label != null) {
+      await prefs.remove(_kbcLastDisabledKey);
+    }
+    return label;
+  }
+
+  /// Describes the patch currently staged at the canonical persistence
+  /// path — what [tryApplyStagedKbcPatch] would re-apply on the next
+  /// cold boot. Returns null when no patch is staged. Does NOT touch
+  /// the loader; safe to call from a dashboard / debug screen at any
+  /// time. Reads metadata only — the KBC payload is not parsed.
+  ///
+  /// Useful for "active version" displays, support flows ("paste the
+  /// label of the patch you're running"), and the eventual server-side
+  /// "what patches do my devices report?" rollup.
+  Future<KbcStagedPatchInfo?> getStagedKbcPatchInfo() async {
+    final docsDir = await getApplicationDocumentsDirectory();
+    final patchPath =
+        '${docsDir.path}/sankofa-deploy/patches/active/patch.skdp';
+    final f = File(patchPath);
+    if (!f.existsSync()) return null;
+    try {
+      final bytes = await f.readAsBytes();
+      final parsed = parseKbcEnvelope(bytes);
+      final stat = await f.stat();
+      return KbcStagedPatchInfo(
+        path: patchPath,
+        sizeBytes: bytes.length,
+        modifiedAt: stat.modified,
+        label: parsed.metadata['label']?.toString(),
+        engineCommit: parsed.metadata['engineCommit']?.toString(),
+        dartVersion: parsed.metadata['dartVersion']?.toString(),
+        targetBinaryVersion:
+            parsed.metadata['targetBinaryVersion']?.toString(),
+        signed: parsed.sigAlg == KbcSigAlg.ed25519,
+      );
+    } catch (_) {
+      return KbcStagedPatchInfo(
+        path: patchPath,
+        sizeBytes: f.lengthSync(),
+        modifiedAt: f.statSync().modified,
+        label: null,
+        engineCommit: null,
+        dartVersion: null,
+        targetBinaryVersion: null,
+        signed: false,
+        parseError: true,
+      );
     }
   }
 
