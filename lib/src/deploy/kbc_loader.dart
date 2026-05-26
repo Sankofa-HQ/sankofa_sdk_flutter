@@ -137,14 +137,19 @@ String? _engineCompatError(Map<String, dynamic> metadata) {
 
 /// Internal apply pipeline. Exposed publicly via SankofaDeploy.
 ///
-/// [signingPubkeyB64], when non-null, makes signature verification
-/// mandatory. The envelope MUST be sig_alg=ed25519 AND its signature
-/// MUST verify against this 32-byte Ed25519 public key (base64). Pass
-/// null only when the app deliberately opts out (dev / unsigned mode).
+/// Signature verification: pass one or both of [signingPubkeyB64] (a
+/// single pubkey, host-app-embedded) and [signingPubkeysB64] (multiple
+/// pubkeys, typically server-distributed via handshake). They're
+/// concatenated and verification accepts on any-match — supports
+/// graceful rotation. When BOTH are null/empty, signature verification
+/// is skipped entirely (dev / unsigned mode). When EITHER is set,
+/// the envelope MUST be sig_alg=ed25519 with a signature that verifies
+/// against one of the supplied keys, or KbcApplyException is thrown.
 Future<KbcPatchResult> applyKbcEnvelope(
   Uint8List envelopeBytes, {
   required KbcLoaderFn loader,
   String? signingPubkeyB64,
+  List<String>? signingPubkeysB64,
 }) async {
   ParsedKbcEnvelope parsed;
   try {
@@ -159,12 +164,17 @@ Future<KbcPatchResult> applyKbcEnvelope(
     );
   }
 
-  // v2 MVP: Ed25519 signature verification. Three cases:
-  //   1. App embedded a pubkey → require signed envelope AND valid signature.
-  //   2. App embedded no pubkey + envelope is unsigned → allow (legacy).
-  //   3. App embedded no pubkey + envelope is signed → allow but log
-  //      (envelope is over-secured for this app; not a security issue).
-  if (signingPubkeyB64 != null && signingPubkeyB64.isNotEmpty) {
+  // v2 MVP + v2.2: Ed25519 signature verification. Merge the host-app-
+  // embedded pubkey (v2 MVP, single) with the server-distributed pubkeys
+  // (v2.2, list — fetched via /api/v1/handshake's modules.deploy.
+  // signing_keys). Verification accepts on any-match so a project can
+  // rotate keys server-side without rebuilding the host app.
+  final mergedPubkeys = <String>[
+    if (signingPubkeyB64 != null && signingPubkeyB64.isNotEmpty)
+      signingPubkeyB64,
+    if (signingPubkeysB64 != null) ...signingPubkeysB64,
+  ];
+  if (mergedPubkeys.isNotEmpty) {
     if (parsed.sigAlg != KbcSigAlg.ed25519) {
       throw KbcApplyException(
         'envelope is unsigned but app requires Ed25519-signed patches. '
@@ -175,13 +185,15 @@ Future<KbcPatchResult> applyKbcEnvelope(
     final ok = await verifyKbcEnvelopeSignature(
       envelopeBytes: envelopeBytes,
       parsed: parsed,
-      pubkeyB64: signingPubkeyB64,
+      pubkeysB64: mergedPubkeys,
     );
     if (!ok) {
       throw KbcApplyException(
-        'envelope Ed25519 signature did not verify against the app\'s '
-        'embedded pubkey. Either the patch was tampered with in transit, '
-        'or the signing key changed without rebuilding the host app.',
+        'envelope Ed25519 signature did not verify against any of the '
+        '${mergedPubkeys.length} authorized pubkey(s) for this project. '
+        'Either the patch was tampered with in transit, the signing key '
+        'changed without rebuilding the host app, or the key was revoked '
+        'server-side without the device receiving a fresh handshake.',
       );
     }
   } else if (parsed.sigAlg != KbcSigAlg.unsigned &&
@@ -239,11 +251,17 @@ Future<KbcPatchResult> applyKbcEnvelopeFromFile(
   String path, {
   required KbcLoaderFn loader,
   String? signingPubkeyB64,
+  List<String>? signingPubkeysB64,
 }) async {
   final file = File(path);
   if (!file.existsSync()) {
     throw KbcApplyException('envelope file not found: $path');
   }
   final bytes = await file.readAsBytes();
-  return applyKbcEnvelope(bytes, loader: loader, signingPubkeyB64: signingPubkeyB64);
+  return applyKbcEnvelope(
+    bytes,
+    loader: loader,
+    signingPubkeyB64: signingPubkeyB64,
+    signingPubkeysB64: signingPubkeysB64,
+  );
 }

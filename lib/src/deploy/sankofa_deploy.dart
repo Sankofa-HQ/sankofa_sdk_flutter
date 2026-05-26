@@ -67,6 +67,26 @@ class SankofaDeploy implements SankofaModule {
   /// (download_url + sha256 + label) to skip the second round-trip.
   @override
   Future<void> applyHandshake(Map<String, dynamic> config) async {
+    // v2.2 — always read signing_keys, even when the module is disabled
+    // for THIS device's current request (e.g. has_update=false). The
+    // pubkeys are project-scoped, not request-scoped, and a future
+    // apply call in this session needs them ready.
+    final rawKeys = config['signing_keys'];
+    if (rawKeys is List) {
+      final out = <String>[];
+      for (final entry in rawKeys) {
+        if (entry is Map) {
+          final pk = entry['pubkey_b64'];
+          if (pk is String && pk.isNotEmpty) {
+            out.add(pk);
+          }
+        }
+      }
+      _serverSigningKeysB64 = List.unmodifiable(out);
+      if (kDebugMode && out.isNotEmpty) {
+        debugPrint('[Sankofa.deploy] handshake cached ${out.length} server signing key(s)');
+      }
+    }
     if (config['enabled'] == false) return;
     // Future: if config['has_update'] == true, feed the
     // download_url + sha256 + label + size into the platform plugin
@@ -89,6 +109,37 @@ class SankofaDeploy implements SankofaModule {
 
   final SankofaDeployOptions options;
   bool _ready = false;
+
+  /// v2.2 — pubkeys distributed by the server via /api/v1/handshake's
+  /// `modules.deploy.signing_keys` payload. Populated in [applyHandshake];
+  /// merged with [SankofaDeployOptions.signingPubkeyB64] (compile-time
+  /// trust root, if any) at envelope-verify time. Lets a project rotate
+  /// signing keys server-side without a host-app rebuild.
+  ///
+  /// Empty until the first handshake succeeds. If the host app embedded
+  /// a pubkey AND the server hasn't enrolled keys yet, envelopes still
+  /// verify against the embedded key only — graceful adoption path.
+  List<String> _serverSigningKeysB64 = const <String>[];
+
+  /// Snapshot of the active server-distributed signing keys. Exposed
+  /// mostly for debugging — production code never has to read this
+  /// because the apply pipeline pulls it via [_effectiveSigningPubkeys].
+  List<String> get serverSigningKeysB64 => List.unmodifiable(_serverSigningKeysB64);
+
+  /// Merge of the host-embedded pubkey + server-distributed pubkeys.
+  /// Order: embedded first (matches first → fastest path for the common
+  /// "single key" case); server keys after. Caller passes this to
+  /// `verifyKbcEnvelopeSignature` which iterates with any-match semantics.
+  List<String> get _effectiveSigningPubkeys {
+    final embedded = options.signingPubkeyB64;
+    if (embedded == null || embedded.isEmpty) {
+      return _serverSigningKeysB64;
+    }
+    if (_serverSigningKeysB64.isEmpty) {
+      return <String>[embedded];
+    }
+    return <String>[embedded, ..._serverSigningKeysB64];
+  }
 
   /// Internal hook used by `Sankofa.init` — DO NOT call directly. The
   /// per-product `enableDeploy` flag triggers this. Idempotent.
@@ -257,7 +308,7 @@ class SankofaDeploy implements SankofaModule {
     return kbc_loader.applyKbcEnvelope(
       envelopeBytes,
       loader: loader,
-      signingPubkeyB64: options.signingPubkeyB64,
+      signingPubkeysB64: _effectiveSigningPubkeys,
     );
   }
 
@@ -275,7 +326,7 @@ class SankofaDeploy implements SankofaModule {
     return kbc_loader.applyKbcEnvelopeFromFile(
       path,
       loader: loader,
-      signingPubkeyB64: options.signingPubkeyB64,
+      signingPubkeysB64: _effectiveSigningPubkeys,
     );
   }
 
@@ -333,7 +384,7 @@ class SankofaDeploy implements SankofaModule {
       currentLabel: currentLabel,
       persistToDisk: persistToDisk,
       timeout: timeout,
-      signingPubkeyB64: options.signingPubkeyB64,
+      signingPubkeysB64: _effectiveSigningPubkeys,
     );
   }
 

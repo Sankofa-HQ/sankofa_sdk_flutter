@@ -128,6 +128,7 @@ Future<KbcFetchResult> fetchAndApplyKbcPatch({
   bool persistToDisk = true,
   Duration timeout = const Duration(seconds: 30),
   String? signingPubkeyB64,
+  List<String>? signingPubkeysB64,
 }) async {
   final base = endpoint.endsWith('/')
       ? endpoint.substring(0, endpoint.length - 1)
@@ -246,6 +247,7 @@ Future<KbcFetchResult> fetchAndApplyKbcPatch({
       Uint8List.fromList(bytes),
       loader: loader,
       signingPubkeyB64: signingPubkeyB64,
+      signingPubkeysB64: signingPubkeysB64,
     );
   } on KbcApplyException catch (err) {
     throw KbcFetchException(

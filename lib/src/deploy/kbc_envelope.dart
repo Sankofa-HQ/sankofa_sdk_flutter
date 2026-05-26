@@ -198,34 +198,27 @@ ParsedKbcEnvelope parseKbcEnvelope(Uint8List input) {
 }
 
 /// Verify the Ed25519 signature carried in the envelope trailer against
-/// a 32-byte Ed25519 public key. Returns true iff the signature is valid
-/// over bytes [0..trailerOffset) of the original envelope buffer.
+/// one or more 32-byte Ed25519 public keys. Returns true iff the
+/// signature is valid over bytes [0..trailerOffset) under ANY of the
+/// supplied pubkeys (any-match semantics — supports graceful rotation
+/// when a project has multiple active keys enrolled).
 ///
 /// MUST be called with the raw bytes of the envelope file (not the
 /// parsed view), since the parser doesn't retain the original buffer.
-/// Pass `pubkeyB64` as standard base64 of the 32-byte raw point — same
-/// format `sankofa keys generate` emits.
+/// Each entry in `pubkeysB64` is standard base64 of the 32-byte raw
+/// point — same format `sankofa keys generate` emits.
 ///
-/// Returns false on any failure (wrong sig_alg, malformed pubkey,
-/// signature mismatch) — never throws so callers can fail-closed
-/// without try/catch noise.
+/// Returns false on any failure (wrong sig_alg, no pubkeys supplied,
+/// every pubkey malformed, no signature match) — never throws so
+/// callers can fail-closed without try/catch noise.
 Future<bool> verifyKbcEnvelopeSignature({
   required Uint8List envelopeBytes,
   required ParsedKbcEnvelope parsed,
-  required String pubkeyB64,
+  required List<String> pubkeysB64,
 }) async {
   if (parsed.sigAlg != KbcSigAlg.ed25519) return false;
   if (parsed.sigBytes.length != 64) return false;
-  final Uint8List rawPub;
-  try {
-    // Tolerate missing trailing `=` padding — some sources strip it.
-    final trimmed = pubkeyB64.trim();
-    final padded = trimmed.padRight((trimmed.length + 3) & ~3, '=');
-    rawPub = base64.decode(padded);
-  } catch (_) {
-    return false;
-  }
-  if (rawPub.length != 32) return false;
+  if (pubkeysB64.isEmpty) return false;
   // The signature covers everything before the trailer. trailerOffset =
   // totalSize - (4 fixed trailer bytes + sigBytes.length). We don't store
   // trailerOffset on ParsedKbcEnvelope, so recompute from totalSize.
@@ -234,13 +227,27 @@ Future<bool> verifyKbcEnvelopeSignature({
   final signedBytes = Uint8List.sublistView(envelopeBytes, 0, trailerOffset);
 
   final ed = Ed25519();
-  final pubKey = SimplePublicKey(rawPub, type: KeyPairType.ed25519);
-  final signature = Signature(parsed.sigBytes, publicKey: pubKey);
-  try {
-    return await ed.verify(signedBytes, signature: signature);
-  } catch (_) {
-    return false;
+  for (final pubkeyB64 in pubkeysB64) {
+    final Uint8List rawPub;
+    try {
+      // Tolerate missing trailing `=` padding — some sources strip it.
+      final trimmed = pubkeyB64.trim();
+      if (trimmed.isEmpty) continue;
+      final padded = trimmed.padRight((trimmed.length + 3) & ~3, '=');
+      rawPub = base64.decode(padded);
+    } catch (_) {
+      continue;
+    }
+    if (rawPub.length != 32) continue;
+    final pubKey = SimplePublicKey(rawPub, type: KeyPairType.ed25519);
+    final signature = Signature(parsed.sigBytes, publicKey: pubKey);
+    try {
+      if (await ed.verify(signedBytes, signature: signature)) return true;
+    } catch (_) {
+      continue;
+    }
   }
+  return false;
 }
 
 bool _bytesEqual(Uint8List a, Uint8List b) {
