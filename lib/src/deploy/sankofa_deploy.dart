@@ -1,6 +1,8 @@
+import 'dart:convert' show jsonEncode;
 import 'dart:io' show File;
 
 import 'package:flutter/foundation.dart';
+import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -184,6 +186,14 @@ class SankofaDeploy implements SankofaModule {
   /// verify against the embedded key only — graceful adoption path.
   List<String> _serverSigningKeysB64 = const <String>[];
 
+  /// Cached at init so apply / rollback / boot-apply paths can fire
+  /// `/api/deploy/report` events without needing to walk back through
+  /// `Sankofa.instance` (which would create a circular module dep). Set
+  /// once in [initInternal]; never rotated — endpoint changes require
+  /// re-initializing the SDK.
+  String? _ingestEndpoint;
+  String? _ingestApiKey;
+
   /// Snapshot of the active server-distributed signing keys. Exposed
   /// mostly for debugging — production code never has to read this
   /// because the apply pipeline pulls it via [_effectiveSigningPubkeys].
@@ -231,6 +241,8 @@ class SankofaDeploy implements SankofaModule {
   }) async {
     if (_instance != null) return _instance!;
     final deploy = SankofaDeploy._(options: options);
+    deploy._ingestEndpoint = endpoint;
+    deploy._ingestApiKey = apiKey;
     // Register with the Traffic Cop BEFORE the platform init kicks off
     // so the first unified handshake (fired from Sankofa.init right
     // after this call returns) has a route for `modules.deploy`. The
@@ -433,22 +445,45 @@ class SankofaDeploy implements SankofaModule {
     String? currentLabel,
     bool persistToDisk = true,
     Duration timeout = const Duration(seconds: 30),
-  }) {
+  }) async {
     // Path C is pure Dart — see applyKbcPatchFromBytes above.
     // Prefix-call to avoid infinite recursion on the instance method.
-    return kbc_fetch.fetchAndApplyKbcPatch(
-      endpoint: endpoint,
-      apiKey: apiKey,
-      appVersion: appVersion,
-      engineVersion: engineVersion,
-      distinctId: distinctId,
-      loader: loader,
-      platform: platform,
-      currentLabel: currentLabel,
-      persistToDisk: persistToDisk,
-      timeout: timeout,
-      signingPubkeysB64: _effectiveSigningPubkeys,
-    );
+    KbcFetchResult result;
+    try {
+      result = await kbc_fetch.fetchAndApplyKbcPatch(
+        endpoint: endpoint,
+        apiKey: apiKey,
+        appVersion: appVersion,
+        engineVersion: engineVersion,
+        distinctId: distinctId,
+        loader: loader,
+        platform: platform,
+        currentLabel: currentLabel,
+        persistToDisk: persistToDisk,
+        timeout: timeout,
+        signingPubkeysB64: _effectiveSigningPubkeys,
+      );
+    } catch (err) {
+      // Telemetry fire-and-forget. Don't await — preserve the original
+      // throw timing for the host's UI feedback.
+      _reportKbcEvent(
+        eventType: 'kbc_apply_failed',
+        bundleLabel: currentLabel,
+        appVersion: appVersion,
+        platform: platform,
+      );
+      rethrow;
+    }
+    if (result.hasUpdate && result.applied != null) {
+      _reportKbcEvent(
+        eventType: 'kbc_apply_success',
+        releaseId: result.releaseId,
+        bundleLabel: result.label,
+        appVersion: appVersion,
+        platform: platform,
+      );
+    }
+    return result;
   }
 
   // ── Rollback safety (Shorebird-pattern) ─────────────────────────────
@@ -527,11 +562,13 @@ class SankofaDeploy implements SankofaModule {
     if (bootCount > kbcRollbackThreshold) {
       // Best-effort: record the label so consumeLastAutoDisabledPatchLabel
       // can surface it later. Parse-only — no apply, no loader call.
+      String? rolledBackLabel;
       try {
         final bytes = await File(patchPath).readAsBytes();
         final parsed = parseKbcEnvelope(bytes);
         final lbl = parsed.metadata['label'];
         if (lbl is String && lbl.isNotEmpty) {
+          rolledBackLabel = lbl;
           await prefs.setString(_kbcLastDisabledKey, lbl);
         }
       } catch (_) {
@@ -553,16 +590,27 @@ class SankofaDeploy implements SankofaModule {
         // applying; don't keep crash-looping.
       }
       await prefs.remove(_kbcBootCounterKey);
+      // Fire-and-forget: tell the server we just rolled this label
+      // back. Don't await — cold-boot path must stay snappy.
+      unawaited(_reportKbcEvent(
+        eventType: 'kbc_boot_apply_skipped_rollback',
+        bundleLabel: rolledBackLabel,
+      ));
       return null;
     }
     await prefs.setInt(_kbcBootCounterKey, bootCount);
 
     try {
-      return await kbc_loader.applyKbcEnvelopeFromFile(
+      final result = await kbc_loader.applyKbcEnvelopeFromFile(
         patchPath,
         loader: loader,
         signingPubkeysB64: _effectiveSigningPubkeys,
       );
+      unawaited(_reportKbcEvent(
+        eventType: 'kbc_boot_apply_success',
+        bundleLabel: result.metadata['label']?.toString(),
+      ));
+      return result;
     } on KbcApplyException catch (err) {
       if (kDebugMode) {
         debugPrint(
@@ -600,6 +648,62 @@ class SankofaDeploy implements SankofaModule {
     final count = prefs.getInt(_kbcBootCounterKey) ?? 0;
     await prefs.remove(_kbcBootCounterKey);
     return count;
+  }
+
+  /// Best-effort fire-and-forget POST to `/api/deploy/report` so the
+  /// server can roll up "what fraction of devices on app_version X
+  /// have patch label Y applied?". Silent on every failure mode —
+  /// telemetry that crashes the app is a net loss. Bounded 3s timeout
+  /// so cold-boot path isn't blocked by a slow/unreachable server.
+  ///
+  /// Event types we emit:
+  ///   - `kbc_boot_apply_success`       — staged patch re-applied at cold boot
+  ///   - `kbc_boot_apply_skipped_rollback` — auto-disable fired before this boot
+  ///   - `kbc_apply_success`            — fresh fetch + apply landed
+  ///   - `kbc_apply_failed`             — fetch ok, apply rejected (sig fail, etc.)
+  ///
+  /// Mirrors the existing apply_success/rollback semantics that the
+  /// Android baseline path emits — same `deploy_events` ClickHouse
+  /// table, same dashboard rollups.
+  Future<void> _reportKbcEvent({
+    required String eventType,
+    String? releaseId,
+    String? bundleLabel,
+    String? appVersion,
+    String? platform,
+  }) async {
+    final endpoint = _ingestEndpoint;
+    final apiKey = _ingestApiKey;
+    if (endpoint == null || apiKey == null) return;
+    try {
+      final url = Uri.parse(
+        '${endpoint.replaceAll(RegExp(r'/+$'), '')}/api/deploy/report',
+      );
+      final body = {
+        'events': [
+          {
+            'event_type': eventType,
+            if (releaseId != null) 'release_id': releaseId,
+            if (bundleLabel != null) 'bundle_label': bundleLabel,
+            if (appVersion != null) 'app_version': appVersion,
+            if (platform != null) 'platform': platform,
+          },
+        ],
+      };
+      await http
+          .post(
+            url,
+            headers: {
+              'x-api-key': apiKey,
+              'Content-Type': 'application/json',
+            },
+            body: jsonEncode(body),
+          )
+          .timeout(const Duration(seconds: 3));
+    } catch (_) {
+      // Telemetry MUST be silent — never crash the host's cold-start
+      // path or steal the network for a failing batch retry.
+    }
   }
 
   /// Returns the label of the most recently auto-disabled patch (and
