@@ -1,0 +1,23 @@
+# Files excluded from `dart pub publish` even when not in .gitignore.
+# Keeps the published archive lean (was ~19 MB; should drop to ~150 KB).
+
+# Example app — the SDK doesn't need it; consumers can find it in the repo.
+example/
+
+# Build artifacts that occasionally get checked in (CI / dashboard upload).
+**/build/
+**/.dart_tool/
+
+# Native CI artifacts that pollute the archive.
+**/Pods/
+**/Podfile.lock
+**/*.podspec
+
+# Generated platform plumbing — Flutter regenerates per-consumer.
+ios/.symlinks/
+android/.gradle/
+
+# Local development noise.
+*.iml
+.idea/
+.vscode/
