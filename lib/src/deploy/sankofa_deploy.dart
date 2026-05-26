@@ -1,8 +1,12 @@
+import 'dart:io' show File;
+
 import 'package:flutter/foundation.dart';
+import 'package:path_provider/path_provider.dart';
 
 import '../core/module_registry.dart';
 import 'deploy_config.dart';
 import 'deploy_platform_interface.dart';
+import 'kbc_loader.dart' show KbcApplyException;
 // Prefix-imported so the SankofaDeploy instance methods named
 // applyKbcPatchFromBytes / applyKbcPatchFromFile / fetchAndApplyKbcPatch
 // don't shadow the top-level helpers they delegate to — without the
@@ -386,6 +390,71 @@ class SankofaDeploy implements SankofaModule {
       timeout: timeout,
       signingPubkeysB64: _effectiveSigningPubkeys,
     );
+  }
+
+  /// Look for a KBC patch that a previous session staged on disk and
+  /// apply it now, before [runApp]. Returns the apply result, or null
+  /// if no patch was staged (or the staged patch is invalid).
+  ///
+  /// This is the **boot-time apply** that closes the OTA loop end-to-end:
+  /// [fetchAndApplyKbcPatch] persists the envelope at
+  /// `<App Documents>/sankofa-deploy/patches/active/patch.skdp`, but
+  /// the patch's effect (e.g. JSON UI overrides decoded by the host)
+  /// lives only in memory for that session. On the next cold boot the
+  /// host must re-apply from disk — otherwise the user sees the
+  /// baseline UI again and "OTA" feels broken. Call this from `main()`
+  /// after `Sankofa.init(...)` and BEFORE `runApp(...)`:
+  ///
+  /// ```dart
+  /// void main() async {
+  ///   WidgetsFlutterBinding.ensureInitialized();
+  ///   await Sankofa.instance.init(enableDeploy: true);
+  ///   final stagedResult = await Sankofa.instance.deploy?.tryApplyStagedKbcPatch(
+  ///     loader: loadModuleFromBytes,
+  ///   );
+  ///   runApp(MyApp(initialPatch: stagedResult));
+  /// }
+  /// ```
+  ///
+  /// Signature verification + ζ.1 engine check + sha-256 integrity all
+  /// run on the staged file just like a fresh fetch — bytes from disk
+  /// are treated with the same fail-closed posture as bytes from B2.
+  /// A signature mismatch (e.g. customer rotated keys via
+  /// `sankofa keys generate` AFTER staging this patch) returns null,
+  /// not an exception, so the app boots clean to baseline.
+  ///
+  /// Throws `StateError` if [Sankofa.deploy] wasn't enabled — calling
+  /// this on a deploy-disabled app is almost certainly a bug. Other
+  /// failures (no file, parse error, sig mismatch, loader error) all
+  /// return null so the cold-start path stays defensive.
+  Future<KbcPatchResult?> tryApplyStagedKbcPatch({
+    required KbcLoaderFn loader,
+  }) async {
+    final docsDir = await getApplicationDocumentsDirectory();
+    final patchPath =
+        '${docsDir.path}/sankofa-deploy/patches/active/patch.skdp';
+    if (!File(patchPath).existsSync()) return null;
+    try {
+      return await kbc_loader.applyKbcEnvelopeFromFile(
+        patchPath,
+        loader: loader,
+        signingPubkeysB64: _effectiveSigningPubkeys,
+      );
+    } on KbcApplyException catch (err) {
+      if (kDebugMode) {
+        debugPrint(
+          '[Sankofa.deploy] staged patch at $patchPath failed to apply: ${err.message}',
+        );
+      }
+      return null;
+    } catch (err) {
+      if (kDebugMode) {
+        debugPrint(
+          '[Sankofa.deploy] unexpected error applying staged patch at $patchPath: $err',
+        );
+      }
+      return null;
+    }
   }
 
   /// Tear down the platform plugin. Called by `Sankofa.dispose()`;
