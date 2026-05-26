@@ -465,16 +465,27 @@ class SankofaDeploy implements SankofaModule {
         signingPubkeysB64: _effectiveSigningPubkeys,
         bannedLabels: banned.isEmpty ? null : banned,
       );
-    } catch (err) {
+    } catch (err, st) {
       // Telemetry fire-and-forget. Don't await — preserve the original
       // throw timing for the host's UI feedback.
+      final stack = err is KbcApplyException
+          ? _formatKbcStackTrace(err.causeStackTrace ?? st)
+          : _formatKbcStackTrace(st);
       _reportKbcEvent(
         eventType: 'kbc_apply_failed',
         bundleLabel: currentLabel,
         appVersion: appVersion,
         platform: platform,
         errorMessage: err.toString(),
-        extra: {'phase': 'fetch_apply', 'cause_class': err.runtimeType.toString()},
+        extra: {
+          'phase': 'fetch_apply',
+          'cause_class': err.runtimeType.toString(),
+          if (err is KbcApplyException && err.cause != null)
+            'inner_cause': err.cause.toString(),
+          if (err is KbcApplyException && err.cause != null)
+            'inner_cause_class': err.cause.runtimeType.toString(),
+          if (stack != null) 'stack_trace': stack,
+        },
       );
       rethrow;
     }
@@ -690,22 +701,35 @@ class SankofaDeploy implements SankofaModule {
           '[Sankofa.deploy] staged patch at $patchPath failed to apply: ${err.message}',
         );
       }
+      final stack = _formatKbcStackTrace(err.causeStackTrace);
       unawaited(_reportKbcEvent(
         eventType: 'kbc_boot_apply_failed',
         errorMessage: err.message,
-        extra: {'phase': 'boot_apply', 'cause_class': 'KbcApplyException'},
+        extra: {
+          'phase': 'boot_apply',
+          'cause_class': 'KbcApplyException',
+          if (err.cause != null) 'inner_cause': err.cause.toString(),
+          if (err.cause != null)
+            'inner_cause_class': err.cause.runtimeType.toString(),
+          if (stack != null) 'stack_trace': stack,
+        },
       ));
       return null;
-    } catch (err) {
+    } catch (err, st) {
       if (kDebugMode) {
         debugPrint(
           '[Sankofa.deploy] unexpected error applying staged patch at $patchPath: $err',
         );
       }
+      final stack = _formatKbcStackTrace(st);
       unawaited(_reportKbcEvent(
         eventType: 'kbc_boot_apply_failed',
         errorMessage: err.toString(),
-        extra: {'phase': 'boot_apply', 'cause_class': err.runtimeType.toString()},
+        extra: {
+          'phase': 'boot_apply',
+          'cause_class': err.runtimeType.toString(),
+          if (stack != null) 'stack_trace': stack,
+        },
       ));
       return null;
     }
@@ -935,6 +959,45 @@ class SankofaDeploy implements SankofaModule {
 
   static String _truncate(String s, int max) =>
       s.length <= max ? s : '${s.substring(0, max)}…<+${s.length - max}>';
+
+  /// ζ.2 — format a StackTrace for telemetry. Strips framework noise,
+  /// keeps the leading user-source + interpreter frames, caps at 12
+  /// frames (≈ 1.5 KB worst case). Preserves source-position info that
+  /// dart2bytecode bakes into KBC when `source-positions` is set in
+  /// the bytecode-options (default for `sankofa patch`).
+  ///
+  /// Output shape (one line per frame, oldest last):
+  ///   "#0 patchFn (file:///.../sankofa_patch.dart:14:5)"
+  ///   "#1 main (file:///.../sankofa_patch.dart:8:3)"
+  ///   "#2 _Interpreter.invoke (sankofa-fork interpreter)"
+  ///
+  /// Returns null for null / empty input so the caller can skip adding
+  /// the field entirely (smaller telemetry payload).
+  static String? _formatKbcStackTrace(StackTrace? st) {
+    if (st == null) return null;
+    final raw = st.toString();
+    if (raw.isEmpty) return null;
+    // Split + trim. Dart's StackTrace.toString() uses '\n' line breaks.
+    final lines = raw.split('\n').map((l) => l.trimRight()).where((l) => l.isNotEmpty).toList();
+    if (lines.isEmpty) return null;
+    // Keep frames that look like Dart stack-trace lines (#N or 'at ').
+    // Skip generic "<asynchronous suspension>" markers — they bloat
+    // without adding signal.
+    final kept = <String>[];
+    for (final line in lines) {
+      if (line.contains('<asynchronous suspension>')) continue;
+      // Drop pure framework/runtime noise that doesn't help debugging
+      // (the engine + telemetry serializer don't add value here).
+      if (line.contains('package:flutter/src/runner') ||
+          line.contains('package:stack_trace/')) {
+        continue;
+      }
+      kept.add(line);
+      if (kept.length >= 12) break;
+    }
+    if (kept.isEmpty) return null;
+    return _truncate(kept.join('\n'), 2048);
+  }
 
   /// Returns the label of the most recently auto-disabled patch (and
   /// clears the marker so next call returns null). Dashboards can show

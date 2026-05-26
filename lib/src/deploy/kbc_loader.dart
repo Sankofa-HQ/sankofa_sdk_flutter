@@ -69,9 +69,17 @@ class KbcPatchResult {
 /// fails closed so a tampered or corrupt patch never reaches the
 /// interpreter.
 class KbcApplyException implements Exception {
-  KbcApplyException(this.message, {this.cause});
+  KbcApplyException(this.message, {this.cause, this.causeStackTrace});
   final String message;
   final Object? cause;
+
+  /// Stack trace of the original throw that triggered this exception.
+  /// Preserved through the apply pipeline so ζ.2 telemetry can report
+  /// the interpreter frames (Dart's StackTrace.toString() symbolicates
+  /// down through `dart::Interpreter::Run` to the patch's source
+  /// position when source-positions are baked into the KBC — which is
+  /// the default for `sankofa patch`).
+  final StackTrace? causeStackTrace;
   @override
   String toString() =>
       cause == null ? 'KbcApplyException: $message' : 'KbcApplyException: $message (caused by $cause)';
@@ -228,12 +236,14 @@ Future<KbcPatchResult> applyKbcEnvelope(
   Object? returnValue;
   try {
     returnValue = await loader(parsed.kbcPayload);
-  } catch (err) {
+  } catch (err, st) {
     throw KbcApplyException(
-      'loader threw — likely the running Flutter engine was NOT built '
-      'with dart_dynamic_modules=true (the Sankofa β.1 engine fork). '
-      'Stock Flutter throws "Loading of dynamic modules is not supported".',
+      'loader threw — could be the running Flutter engine was NOT built '
+      'with dart_dynamic_modules=true (the Sankofa β.1 engine fork — '
+      'stock Flutter throws "Loading of dynamic modules is not supported"), '
+      'OR the patch itself threw at top level (see causeStackTrace).',
       cause: err,
+      causeStackTrace: st,
     );
   }
 
