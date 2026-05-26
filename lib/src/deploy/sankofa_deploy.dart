@@ -471,6 +471,8 @@ class SankofaDeploy implements SankofaModule {
         bundleLabel: currentLabel,
         appVersion: appVersion,
         platform: platform,
+        errorMessage: err.toString(),
+        extra: {'phase': 'fetch_apply', 'cause_class': err.runtimeType.toString()},
       );
       rethrow;
     }
@@ -617,6 +619,11 @@ class SankofaDeploy implements SankofaModule {
           '[Sankofa.deploy] staged patch at $patchPath failed to apply: ${err.message}',
         );
       }
+      unawaited(_reportKbcEvent(
+        eventType: 'kbc_boot_apply_failed',
+        errorMessage: err.message,
+        extra: {'phase': 'boot_apply', 'cause_class': 'KbcApplyException'},
+      ));
       return null;
     } catch (err) {
       if (kDebugMode) {
@@ -624,6 +631,11 @@ class SankofaDeploy implements SankofaModule {
           '[Sankofa.deploy] unexpected error applying staged patch at $patchPath: $err',
         );
       }
+      unawaited(_reportKbcEvent(
+        eventType: 'kbc_boot_apply_failed',
+        errorMessage: err.toString(),
+        extra: {'phase': 'boot_apply', 'cause_class': err.runtimeType.toString()},
+      ));
       return null;
     }
   }
@@ -658,9 +670,17 @@ class SankofaDeploy implements SankofaModule {
   ///
   /// Event types we emit:
   ///   - `kbc_boot_apply_success`       — staged patch re-applied at cold boot
+  ///   - `kbc_boot_apply_failed`        — boot-apply parse/sig/loader error
   ///   - `kbc_boot_apply_skipped_rollback` — auto-disable fired before this boot
   ///   - `kbc_apply_success`            — fresh fetch + apply landed
   ///   - `kbc_apply_failed`             — fetch ok, apply rejected (sig fail, etc.)
+  ///
+  /// `errorMessage` / `extra`, when set, are JSON-packed into the
+  /// request body's `metadata` field (deploy_events has a text column
+  /// for it). This is the ζ.2 MVP — instead of shipping full bytecode
+  /// symbolication today, customers get "release X failed on Y devices
+  /// with error: <message>" rolled up in the dashboard, which is 80%
+  /// of the debugging value.
   ///
   /// Mirrors the existing apply_success/rollback semantics that the
   /// Android baseline path emits — same `deploy_events` ClickHouse
@@ -671,6 +691,8 @@ class SankofaDeploy implements SankofaModule {
     String? bundleLabel,
     String? appVersion,
     String? platform,
+    String? errorMessage,
+    Map<String, Object?>? extra,
   }) async {
     final endpoint = _ingestEndpoint;
     final apiKey = _ingestApiKey;
@@ -679,6 +701,15 @@ class SankofaDeploy implements SankofaModule {
       final url = Uri.parse(
         '${endpoint.replaceAll(RegExp(r'/+$'), '')}/api/deploy/report',
       );
+      // Pack diagnostic context into the existing metadata field so
+      // the server schema doesn't grow per new SDK feature. Truncate
+      // error messages aggressively — full stack traces don't help
+      // server-side rollups and waste cold-boot bandwidth.
+      final metaMap = <String, Object?>{
+        if (errorMessage != null && errorMessage.isNotEmpty)
+          'error': _truncate(errorMessage, 512),
+        if (extra != null) ...extra,
+      };
       final body = {
         'events': [
           {
@@ -687,6 +718,7 @@ class SankofaDeploy implements SankofaModule {
             if (bundleLabel != null) 'bundle_label': bundleLabel,
             if (appVersion != null) 'app_version': appVersion,
             if (platform != null) 'platform': platform,
+            if (metaMap.isNotEmpty) 'metadata': jsonEncode(metaMap),
           },
         ],
       };
@@ -705,6 +737,9 @@ class SankofaDeploy implements SankofaModule {
       // path or steal the network for a failing batch retry.
     }
   }
+
+  static String _truncate(String s, int max) =>
+      s.length <= max ? s : '${s.substring(0, max)}…<+${s.length - max}>';
 
   /// Returns the label of the most recently auto-disabled patch (and
   /// clears the marker so next call returns null). Dashboards can show
