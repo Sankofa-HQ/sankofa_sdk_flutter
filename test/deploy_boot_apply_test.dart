@@ -58,7 +58,9 @@ Uint8List buildUnsignedEnvelope({
 late Directory _tempDocs;
 late String _patchDir;
 late String _patchPath;
+late String _lastGoodPath;
 const _kBootCounterKey = 'sankofa.deploy.kbc.boot_counter';
+const _kBannedLabelsKey = 'sankofa.deploy.kbc.banned_labels';
 
 void _mockPathProvider() {
   const channel = MethodChannel('plugins.flutter.io/path_provider');
@@ -113,6 +115,7 @@ void main() {
     _tempDocs = await Directory.systemTemp.createTemp('sankofa-test-');
     _patchDir = '${_tempDocs.path}/sankofa-deploy/patches/active';
     _patchPath = '$_patchDir/patch.skdp';
+    _lastGoodPath = '${_tempDocs.path}/sankofa-deploy/patches/last_good/patch.skdp';
     _mockPathProvider();
   });
 
@@ -171,12 +174,17 @@ void main() {
       // to crash on subsequent boots.
       expect(File(_patchPath).existsSync(), isFalse,
           reason: 'auto-disable should move patch.skdp out of the active slot');
-      final disabledFiles = Directory(_patchDir)
-          .listSync()
-          .where((f) => f.path.contains('patch.skdp.disabled-'))
-          .toList();
+      // Disabled files now live in a sibling `disabled/` subdir, not
+      // under active/ — keeps the active dir clean for the next patch.
+      final disabledDir = Directory('${_tempDocs.path}/sankofa-deploy/patches/disabled');
+      final disabledFiles = disabledDir.existsSync()
+          ? disabledDir
+              .listSync()
+              .where((f) => f.path.contains('patch.skdp.disabled-'))
+              .toList()
+          : <FileSystemEntity>[];
       expect(disabledFiles, isNotEmpty,
-          reason: 'auto-disabled patch must land at patch.skdp.disabled-<ts>');
+          reason: 'auto-disabled patch must land at disabled/patch.skdp.disabled-<ts>');
 
       // Boot counter must reset so a NEW staged patch isn't immediately
       // killed by the previous one's leftover boot count.
@@ -229,6 +237,106 @@ void main() {
       expect(result, isNull);
       // Counter unchanged — we didn't apply, didn't tick, didn't reset.
       expect(prefs.getInt(_kBootCounterKey), 2);
+    });
+  });
+
+  group('last_good slot + auto-restore on rollback', () {
+    test('notifyKbcPatchReady promotes active → last_good', () async {
+      _stageValidPatch(label: 'p1');
+      final deploy = await _initTestDeploy();
+      await deploy.tryApplyStagedKbcPatch(loader: _fakeLoader);
+      // Pre-promote: last_good must not exist.
+      expect(File(_lastGoodPath).existsSync(), isFalse);
+      await deploy.notifyKbcPatchReady();
+      expect(File(_lastGoodPath).existsSync(), isTrue,
+          reason: 'notify must copy active → last_good');
+      // File bytes must match — promote is a copy, not just a marker.
+      expect(File(_lastGoodPath).readAsBytesSync(),
+          equals(File(_patchPath).readAsBytesSync()));
+    });
+
+    test('rollback restores last_good when threshold trips', () async {
+      // p1 was promoted (stored under last_good).
+      _stageValidPatch(label: 'p1-good');
+      final deploy = await _initTestDeploy();
+      await deploy.tryApplyStagedKbcPatch(loader: _fakeLoader);
+      await deploy.notifyKbcPatchReady();
+      final p1Bytes = File(_lastGoodPath).readAsBytesSync();
+
+      // p2 ships, replaces active. Three crashes later, the rollback
+      // gate trips and restores last_good (= p1).
+      _stageValidPatch(label: 'p2-bad');
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setInt(_kBootCounterKey, SankofaDeploy.kbcRollbackThreshold);
+      final result = await deploy.tryApplyStagedKbcPatch(loader: _fakeLoader);
+      expect(result, isNull, reason: 'rollback should skip apply');
+
+      // active must now equal p1 (restored), NOT p2 (rolled back), and
+      // NOT empty (no full-baseline drop).
+      expect(File(_patchPath).existsSync(), isTrue,
+          reason: 'active must be restored, not just emptied');
+      expect(File(_patchPath).readAsBytesSync(), equals(p1Bytes),
+          reason: 'restored active must match last_good content');
+
+      // p2 label should be in the banned set so the next fetch
+      // doesn't re-download it.
+      final banned = await deploy.getBannedKbcLabels();
+      expect(banned, contains('p2-bad'));
+      expect(banned, isNot(contains('p1-good')));
+    });
+
+    test('rollback falls to baseline when no last_good exists', () async {
+      // First-ever patch crashes immediately — no last_good to fall
+      // back to. Legacy behavior: active is moved aside, baseline boots.
+      _stageValidPatch(label: 'first-patch-crashy');
+      final deploy = await _initTestDeploy();
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setInt(_kBootCounterKey, SankofaDeploy.kbcRollbackThreshold);
+      await deploy.tryApplyStagedKbcPatch(loader: _fakeLoader);
+      // active is gone, no last_good to restore from.
+      expect(File(_patchPath).existsSync(), isFalse);
+      expect(File(_lastGoodPath).existsSync(), isFalse);
+      // Label is still banned.
+      final banned = await deploy.getBannedKbcLabels();
+      expect(banned, contains('first-patch-crashy'));
+    });
+
+    test('rollback refuses to restore a last_good that is itself banned',
+        () async {
+      // Pathological: last_good label was somehow added to banned set
+      // (e.g. customer manually banned it via API in a future build).
+      // Restore should bail rather than apply a banned patch.
+      _stageValidPatch(label: 'p1');
+      final deploy = await _initTestDeploy();
+      await deploy.tryApplyStagedKbcPatch(loader: _fakeLoader);
+      await deploy.notifyKbcPatchReady();
+      // p1 is now in last_good. Ban it.
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_kBannedLabelsKey, 'p1');
+
+      // Trip rollback on a different active patch.
+      _stageValidPatch(label: 'p2');
+      await prefs.setInt(_kBootCounterKey, SankofaDeploy.kbcRollbackThreshold);
+      await deploy.tryApplyStagedKbcPatch(loader: _fakeLoader);
+      // active should be EMPTY — last_good (p1) was rejected because banned.
+      expect(File(_patchPath).existsSync(), isFalse);
+    });
+  });
+
+  group('banned-labels API', () {
+    test('getBannedKbcLabels returns empty when none banned', () async {
+      final deploy = await _initTestDeploy();
+      expect(await deploy.getBannedKbcLabels(), isEmpty);
+    });
+
+    test('clearBannedKbcLabels removes the set + returns previous contents',
+        () async {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_kBannedLabelsKey, 'a,b,c');
+      final deploy = await _initTestDeploy();
+      final cleared = await deploy.clearBannedKbcLabels();
+      expect(cleared, equals({'a', 'b', 'c'}));
+      expect(await deploy.getBannedKbcLabels(), isEmpty);
     });
   });
 

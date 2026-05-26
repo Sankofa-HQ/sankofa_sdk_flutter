@@ -129,6 +129,7 @@ Future<KbcFetchResult> fetchAndApplyKbcPatch({
   Duration timeout = const Duration(seconds: 30),
   String? signingPubkeyB64,
   List<String>? signingPubkeysB64,
+  Set<String>? bannedLabels,
 }) async {
   final base = endpoint.endsWith('/')
       ? endpoint.substring(0, endpoint.length - 1)
@@ -191,6 +192,21 @@ Future<KbcFetchResult> fetchAndApplyKbcPatch({
   final expectedSha = body['sha256']?.toString();
   final releaseId = body['release_id']?.toString();
   final label = body['label']?.toString();
+
+  // Banned-labels gate: if a previous boot auto-rolled-back this label,
+  // refuse to re-download + re-apply. Without this the user crash-loops
+  // on every fetch (server still serves the bad patch as "latest").
+  // Customer can clear via Sankofa.deploy.clearBannedKbcLabels().
+  if (label != null &&
+      bannedLabels != null &&
+      bannedLabels.contains(label)) {
+    return KbcFetchResult(
+      hasUpdate: false,
+      reason: 'label_banned_locally',
+      label: label,
+      releaseId: releaseId,
+    );
+  }
   final size = (body['size'] as num?)?.toInt();
   if (downloadUrl == null || downloadUrl.isEmpty) {
     throw KbcFetchException('check response missing download_url');

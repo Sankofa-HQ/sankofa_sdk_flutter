@@ -1,5 +1,5 @@
 import 'dart:convert' show jsonEncode;
-import 'dart:io' show File;
+import 'dart:io' show Directory, File;
 
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
@@ -448,6 +448,7 @@ class SankofaDeploy implements SankofaModule {
   }) async {
     // Path C is pure Dart — see applyKbcPatchFromBytes above.
     // Prefix-call to avoid infinite recursion on the instance method.
+    final banned = await getBannedKbcLabels();
     KbcFetchResult result;
     try {
       result = await kbc_fetch.fetchAndApplyKbcPatch(
@@ -462,6 +463,7 @@ class SankofaDeploy implements SankofaModule {
         persistToDisk: persistToDisk,
         timeout: timeout,
         signingPubkeysB64: _effectiveSigningPubkeys,
+        bannedLabels: banned.isEmpty ? null : banned,
       );
     } catch (err) {
       // Telemetry fire-and-forget. Don't await — preserve the original
@@ -479,6 +481,17 @@ class SankofaDeploy implements SankofaModule {
     if (result.hasUpdate && result.applied != null) {
       _reportKbcEvent(
         eventType: 'kbc_apply_success',
+        releaseId: result.releaseId,
+        bundleLabel: result.label,
+        appVersion: appVersion,
+        platform: platform,
+      );
+    } else if (result.reason == 'label_banned_locally') {
+      // Surface the skip so dashboards know "this device knows label X
+      // is bad and is refusing to re-fetch it". Server-side telemetry
+      // can then prompt the customer to disable the release globally.
+      _reportKbcEvent(
+        eventType: 'kbc_apply_skipped_label_banned',
         releaseId: result.releaseId,
         bundleLabel: result.label,
         appVersion: appVersion,
@@ -505,6 +518,38 @@ class SankofaDeploy implements SankofaModule {
 
   static const String _kbcBootCounterKey = 'sankofa.deploy.kbc.boot_counter';
   static const String _kbcLastDisabledKey = 'sankofa.deploy.kbc.last_disabled_label';
+
+  /// Comma-separated set of patch labels that have triggered auto-
+  /// rollback at any point in this app's life. The SDK refuses to
+  /// re-apply any patch whose label is in this set — prevents the
+  /// "crash 3x → rollback → server still serves the same bad patch →
+  /// re-download → crash again" loop. Customers can clear via
+  /// [clearBannedKbcLabels] when a fixed re-issue ships with the same
+  /// label (rare; usually a hotfix uses a new label like "v1-hotfix").
+  static const String _kbcBannedLabelsKey = 'sankofa.deploy.kbc.banned_labels';
+
+  /// On-disk slot names beneath `<Documents>/sankofa-deploy/patches/`.
+  ///   - `active/`     — what tryApplyStagedKbcPatch reads on every boot
+  ///   - `last_good/`  — most recent patch promoted by notifyKbcPatch
+  ///                     Ready. Auto-rollback restores from here.
+  ///   - `disabled/`   — bad patches that crashed past the rollback
+  ///                     threshold. Kept for forensics; never re-applied.
+  static const String _kbcSlotActive = 'active';
+  static const String _kbcSlotLastGood = 'last_good';
+  static const String _kbcSlotDisabled = 'disabled';
+  static const String _kbcPatchFileName = 'patch.skdp';
+
+  /// Absolute path to a slot's patch file. Used by all the boot-time
+  /// and rollback paths so the layout stays consistent.
+  Future<String> _kbcSlotPath(String slot) async {
+    final docsDir = await getApplicationDocumentsDirectory();
+    return '${docsDir.path}/sankofa-deploy/patches/$slot/$_kbcPatchFileName';
+  }
+
+  Future<Directory> _kbcSlotDir(String slot) async {
+    final docsDir = await getApplicationDocumentsDirectory();
+    return Directory('${docsDir.path}/sankofa-deploy/patches/$slot');
+  }
 
   /// Max consecutive boots that may apply the staged patch without
   /// [notifyKbcPatchReady] being called before we disable it. Hosts can
@@ -550,20 +595,20 @@ class SankofaDeploy implements SankofaModule {
   Future<KbcPatchResult?> tryApplyStagedKbcPatch({
     required KbcLoaderFn loader,
   }) async {
-    final docsDir = await getApplicationDocumentsDirectory();
-    final patchPath =
-        '${docsDir.path}/sankofa-deploy/patches/active/patch.skdp';
+    final patchPath = await _kbcSlotPath(_kbcSlotActive);
     if (!File(patchPath).existsSync()) return null;
 
     // Rollback gate: if the previous N boots failed to reach
     // notifyKbcPatchReady, the staged patch is presumed bad. Move it
-    // aside so future boots fall back to baseline + record which label
-    // got disabled so dashboards / support can correlate.
+    // to the disabled archive, then RESTORE last_good if one exists —
+    // dropping all the way back to baseline loses every successful
+    // patch in the chain and is way more disruptive than necessary.
     final prefs = await SharedPreferences.getInstance();
     final bootCount = (prefs.getInt(_kbcBootCounterKey) ?? 0) + 1;
     if (bootCount > kbcRollbackThreshold) {
-      // Best-effort: record the label so consumeLastAutoDisabledPatchLabel
-      // can surface it later. Parse-only — no apply, no loader call.
+      // Best-effort: parse the bad envelope's label before moving it
+      // aside, so we can record it in the banned set + tell the
+      // dashboard which release failed. Parse-only — no apply.
       String? rolledBackLabel;
       try {
         final bytes = await File(patchPath).readAsBytes();
@@ -572,19 +617,27 @@ class SankofaDeploy implements SankofaModule {
         if (lbl is String && lbl.isNotEmpty) {
           rolledBackLabel = lbl;
           await prefs.setString(_kbcLastDisabledKey, lbl);
+          // Ban the label so /api/deploy/check serving the same patch
+          // again doesn't crash-loop: fetchAndApplyKbcPatch consults
+          // _kbcBannedLabelsKey before applying.
+          await _addBannedLabel(prefs, lbl);
         }
       } catch (_) {
-        // Parse failed too — the envelope is wedged in a way the
-        // rollback marker can't help with. Move on.
+        // Parse failed too — wedged envelope; can't ban the label but
+        // the file still gets moved aside.
       }
       try {
+        final disabledDir = await _kbcSlotDir(_kbcSlotDisabled);
+        if (!disabledDir.existsSync()) {
+          disabledDir.createSync(recursive: true);
+        }
         final disabledPath =
-            '${docsDir.path}/sankofa-deploy/patches/active/patch.skdp.disabled-${DateTime.now().millisecondsSinceEpoch}';
+            '${disabledDir.path}/patch.skdp.disabled-${DateTime.now().millisecondsSinceEpoch}';
         await File(patchPath).rename(disabledPath);
         if (kDebugMode) {
           debugPrint(
-            '[Sankofa.deploy] AUTO-ROLLBACK: staged patch crashed $bootCount consecutive boots; '
-            'moved to $disabledPath. Booting baseline.',
+            '[Sankofa.deploy] AUTO-ROLLBACK: staged patch "$rolledBackLabel" '
+            'crashed $bootCount consecutive boots; moved to $disabledPath.',
           );
         }
       } catch (_) {
@@ -592,11 +645,29 @@ class SankofaDeploy implements SankofaModule {
         // applying; don't keep crash-looping.
       }
       await prefs.remove(_kbcBootCounterKey);
-      // Fire-and-forget: tell the server we just rolled this label
-      // back. Don't await — cold-boot path must stay snappy.
+
+      // Restore last_good → active if we have one. Customer doesn't
+      // drop all the way back to baseline — falls back to the most
+      // recent patch that actually survived a boot.
+      final restoredFromLastGood = await _restoreLastGoodToActive();
+      if (restoredFromLastGood) {
+        if (kDebugMode) {
+          debugPrint(
+            '[Sankofa.deploy] AUTO-ROLLBACK: restored last_good patch to active. '
+            'Next boot will apply the previous known-good patch.',
+          );
+        }
+        unawaited(_reportKbcEvent(
+          eventType: 'kbc_patch_restored_from_last_good',
+          bundleLabel: rolledBackLabel,
+          extra: {'reason': 'rollback_threshold_exceeded'},
+        ));
+      }
+
       unawaited(_reportKbcEvent(
         eventType: 'kbc_boot_apply_skipped_rollback',
         bundleLabel: rolledBackLabel,
+        extra: {'restored_last_good': restoredFromLastGood},
       ));
       return null;
     }
@@ -655,11 +726,135 @@ class SankofaDeploy implements SankofaModule {
   ///
   /// Idempotent — calling twice in one boot is harmless. Returns the
   /// boot count that was reset, mostly useful for telemetry / tests.
+  ///
+  /// Side effect: PROMOTES the currently-active patch to the last_good
+  /// slot. This is the moment we declare "this patch worked" — every
+  /// subsequent auto-rollback can restore from this slot instead of
+  /// dropping the user all the way back to baseline.
   Future<int> notifyKbcPatchReady() async {
     final prefs = await SharedPreferences.getInstance();
     final count = prefs.getInt(_kbcBootCounterKey) ?? 0;
     await prefs.remove(_kbcBootCounterKey);
+    // Promote the now-trusted active patch to last_good. Best-effort —
+    // if disk IO fails the next rollback just falls to baseline, which
+    // is the legacy behavior.
+    try {
+      await _promoteActiveToLastGood();
+    } catch (e) {
+      if (kDebugMode) {
+        debugPrint('[Sankofa.deploy] last_good promotion failed (best-effort): $e');
+      }
+    }
     return count;
+  }
+
+  /// Copy active/patch.skdp → last_good/patch.skdp. Called by
+  /// [notifyKbcPatchReady] to mark the current patch as trusted.
+  /// Returns true on success, false when no active patch existed or
+  /// the copy threw. Idempotent — overwrites existing last_good.
+  Future<bool> _promoteActiveToLastGood() async {
+    final activePath = await _kbcSlotPath(_kbcSlotActive);
+    if (!File(activePath).existsSync()) return false;
+    final lastGoodDir = await _kbcSlotDir(_kbcSlotLastGood);
+    if (!lastGoodDir.existsSync()) {
+      lastGoodDir.createSync(recursive: true);
+    }
+    final lastGoodPath = await _kbcSlotPath(_kbcSlotLastGood);
+    await File(activePath).copy(lastGoodPath);
+    // Best-effort telemetry — record which label just got trusted so
+    // dashboards can see the promotion cadence per release.
+    String? label;
+    try {
+      final bytes = await File(activePath).readAsBytes();
+      final parsed = parseKbcEnvelope(bytes);
+      final lbl = parsed.metadata['label'];
+      if (lbl is String) label = lbl;
+    } catch (_) {}
+    unawaited(_reportKbcEvent(
+      eventType: 'kbc_patch_promoted_to_last_good',
+      bundleLabel: label,
+    ));
+    return true;
+  }
+
+  /// Move last_good/patch.skdp → active/patch.skdp. Called by the
+  /// auto-rollback path so the user doesn't drop all the way back to
+  /// baseline UI when a single patch crashes. Returns true if a
+  /// last_good existed and was restored.
+  Future<bool> _restoreLastGoodToActive() async {
+    final lastGoodPath = await _kbcSlotPath(_kbcSlotLastGood);
+    if (!File(lastGoodPath).existsSync()) return false;
+    // If the last_good label is itself banned (shouldn't happen — only
+    // promoted patches make it here — but defensive), skip restore.
+    try {
+      final bytes = await File(lastGoodPath).readAsBytes();
+      final parsed = parseKbcEnvelope(bytes);
+      final lbl = parsed.metadata['label'];
+      if (lbl is String) {
+        final prefs = await SharedPreferences.getInstance();
+        final banned = await _getBannedLabels(prefs);
+        if (banned.contains(lbl)) {
+          if (kDebugMode) {
+            debugPrint(
+              '[Sankofa.deploy] last_good patch "$lbl" is in the banned set; '
+              'refusing to restore. Falling back to baseline.',
+            );
+          }
+          return false;
+        }
+      }
+    } catch (_) {
+      // Parse failed — last_good is corrupt; treat as no restore.
+      return false;
+    }
+    final activeDir = await _kbcSlotDir(_kbcSlotActive);
+    if (!activeDir.existsSync()) {
+      activeDir.createSync(recursive: true);
+    }
+    final activePath = await _kbcSlotPath(_kbcSlotActive);
+    await File(lastGoodPath).copy(activePath);
+    return true;
+  }
+
+  /// Read the banned-label set out of SharedPreferences. Stored as a
+  /// comma-separated string for forward-compat with SharedPreferences
+  /// implementations that don't support setStringList everywhere.
+  Future<Set<String>> _getBannedLabels(SharedPreferences prefs) async {
+    final raw = prefs.getString(_kbcBannedLabelsKey);
+    if (raw == null || raw.isEmpty) return <String>{};
+    return raw.split(',').where((s) => s.isNotEmpty).toSet();
+  }
+
+  Future<void> _addBannedLabel(SharedPreferences prefs, String label) async {
+    final cur = await _getBannedLabels(prefs);
+    cur.add(label);
+    // Cap at 50 entries (FIFO drop oldest) so a misbehaving customer
+    // app can't grow this prefs blob unboundedly. 50 is generous —
+    // most production apps will see < 5 bad labels in their lifetime.
+    final list = cur.toList();
+    if (list.length > 50) {
+      list.removeRange(0, list.length - 50);
+    }
+    await prefs.setString(_kbcBannedLabelsKey, list.join(','));
+  }
+
+  /// Returns the current set of banned patch labels — patches that
+  /// auto-rolled-back and won't be re-applied. Dashboards / support
+  /// flows can show these; [clearBannedKbcLabels] resets the set.
+  Future<Set<String>> getBannedKbcLabels() async {
+    final prefs = await SharedPreferences.getInstance();
+    return _getBannedLabels(prefs);
+  }
+
+  /// Clear the banned-label set so previously rolled-back patches can
+  /// be re-applied. Useful when a customer ships a fix re-using the
+  /// same label as a broken one (rare). Returns the labels that were
+  /// cleared, for logging / telemetry.
+  Future<Set<String>> clearBannedKbcLabels() async {
+    final prefs = await SharedPreferences.getInstance();
+    final cur = await _getBannedLabels(prefs);
+    await prefs.remove(_kbcBannedLabelsKey);
+    return cur;
   }
 
   /// Best-effort fire-and-forget POST to `/api/deploy/report` so the
