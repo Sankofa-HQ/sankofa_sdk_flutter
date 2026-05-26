@@ -25,7 +25,7 @@ export 'src/config/item_decision.dart'
     show ItemDecision, ItemReason, ConfigType, ConfigChangeListener;
 
 // Sankofa Deploy — OTA updates (Flutter Code)
-export 'src/deploy/sankofa_deploy.dart' show SankofaDeploy;
+export 'src/deploy/sankofa_deploy.dart' show SankofaDeploy, KbcStagedPatchInfo;
 export 'src/deploy/deploy_config.dart' show SankofaDeployOptions;
 export 'src/deploy/update_status.dart' show UpdateStatus;
 // β.3 + ε + β.4 + η — Sankofa Deploy: Flutter Code KBC patch apply API (iOS Path C).
