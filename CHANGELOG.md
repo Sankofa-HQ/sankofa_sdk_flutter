@@ -26,6 +26,34 @@
     of the active patch (label, dartVersion, engineCommit, signed
     flag, size, modifiedAt) for debug screens.
 
+### Hardening (data integrity, privacy, crash durability, robustness)
+
+*   **Pulse auto-show** — surveys flagged `auto_show` in the dashboard
+    now present automatically (parity with iOS/Android). New
+    `SankofaPulse.setNavigatorKey(GlobalKey<NavigatorState>)` gives the
+    pump a presentation anchor; honours per-survey cooldown + delay and
+    re-evaluates on app foreground / after each fetch. Screen/URL
+    targeting now works (the eligibility context populates the current
+    screen). `refreshSurveys()` forces a fresh fetch after `identify()`.
+*   **Analytics queue** — per-status delivery disposition (transient
+    failures retry, client errors drop) instead of all-or-nothing,
+    plus a hard size cap + 48h TTL and single-flight flush. Custom
+    property numbers/booleans keep their native JSON type.
+*   **Session replay privacy** — automatic masking of text inputs
+    (always for obscured fields), `SankofaMask` regions, and optional
+    text/images; the server `mask_all_inputs` flag is now enforced.
+    Bounded frame/event buffers, no data loss on failed uploads,
+    serialized uploads.
+*   **Crash durability** — fatal crashes are spooled synchronously and
+    recovered (with full payload) + flushed on the next launch; fatals
+    are never sampled out; `PlatformDispatcher.onError` preserves the
+    host's default error propagation.
+*   **Lifecycle** — correct cold-start session rotation, `paused`/
+    `hidden`-only backgrounding, race-free init, and `reset()` re-points
+    replay to the new anonymous id.
+*   **Config/Switch** — `config.get<bool>` coerces 1/0 and
+    "true"/"false"; change listeners deliver a consistent snapshot.
+
 ## 0.1.0
 
 *   Added high-fidelity session replay mode.
