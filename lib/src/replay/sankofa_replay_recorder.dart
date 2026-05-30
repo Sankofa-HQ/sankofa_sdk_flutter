@@ -6,6 +6,7 @@ import 'dart:ui' as ui;
 
 import 'sankofa_replay_client.dart';
 import 'sankofa_replay_uploader.dart';
+import 'sankofa_replay_mask.dart';
 import '../sankofa_client.dart';
 
 class SankofaReplayRecorder {
@@ -16,6 +17,23 @@ class SankofaReplayRecorder {
   bool _isCapturingFrame = false;
   SankofaReplayMode _mode = SankofaReplayMode.wireframe;
   int _fps = 1;
+
+  /// Privacy policy. [maskAllInputs] (server default true) masks every text
+  /// input; obscured fields are ALWAYS masked regardless. [maskAllText] also
+  /// masks rendered Text (screenshot) and redacts it in the wireframe
+  /// blueprint. [maskAllImages] masks Image widgets.
+  bool _maskAllInputs = true;
+  bool _maskAllText = false;
+  bool _maskAllImages = false;
+
+  /// Downscale factor for screenshot capture (and the divisor used to map
+  /// logical mask rects onto the captured image's pixels).
+  static const double _capturePixelRatio = 0.7;
+
+  /// Hard caps so a stalled/offline uploader can't grow the buffers without
+  /// bound (OOM). Oldest are dropped past the cap.
+  static const int _maxBufferedFrames = 30;
+  static const int _maxBufferedEvents = 1000;
 
   Timer? _captureTimer;
   Timer? _highFidelityTimer;
@@ -47,8 +65,15 @@ class SankofaReplayRecorder {
     required SankofaReplayMode mode,
     required int fps,
     required String sessionId,
+    bool maskAllInputs = true,
+    bool maskAllText = false,
+    bool maskAllImages = false,
   }) async {
     final configChanged = _mode != mode || _fps != fps;
+
+    _maskAllInputs = maskAllInputs;
+    _maskAllText = maskAllText;
+    _maskAllImages = maskAllImages;
 
     if (_isRecording && configChanged) {
       await flush(force: true);
@@ -106,7 +131,7 @@ class SankofaReplayRecorder {
     _eventBuffer.clear();
     _chunkStartTime = DateTime.now();
 
-    await uploader.uploadChunk(
+    final delivered = await uploader.uploadChunk(
       mode: _mode,
       frames: frames,
       frameTimestamps: frameTimestamps,
@@ -118,6 +143,27 @@ class SankofaReplayRecorder {
         'pixel_ratio': _pixelRatio,
       },
     );
+
+    // On a transient failure, put the chunk back at the FRONT of the buffers
+    // (oldest-first) rather than dropping it, then re-enforce the caps so a
+    // persistent outage still can't grow memory without bound.
+    if (!delivered) {
+      _frameBuffer.insertAll(0, frames);
+      _frameTimestamps.insertAll(0, frameTimestamps);
+      _eventBuffer.insertAll(0, events);
+      _enforceBufferCaps();
+    }
+  }
+
+  /// Drop oldest buffered frames/events past the hard caps (OOM guard).
+  void _enforceBufferCaps() {
+    while (_frameBuffer.length > _maxBufferedFrames) {
+      _frameBuffer.removeAt(0);
+      if (_frameTimestamps.isNotEmpty) _frameTimestamps.removeAt(0);
+    }
+    while (_eventBuffer.length > _maxBufferedEvents) {
+      _eventBuffer.removeAt(0);
+    }
   }
 
   // --- Capture Logic ---
@@ -189,17 +235,31 @@ class SankofaReplayRecorder {
         await Future.delayed(const Duration(milliseconds: 100));
       }
 
+      // Collect sensitive regions to mask BEFORE rasterizing (logical coords,
+      // relative to the capture boundary).
+      final maskRects = _collectMaskRects(boundary);
+
       // Capture timestamp BEFORE the (potentially slow) toImage / encode
       // pipeline so the recorded time reflects when the bitmap was
       // actually rendered.  Both lists stay in lockstep so the uploader
       // can pair each frame with its capture moment.
       final captureTimestampMs = DateTime.now().toUtc().millisecondsSinceEpoch;
-      final image = await boundary.toImage(pixelRatio: 0.7);
-      final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
+      final image = await boundary.toImage(pixelRatio: _capturePixelRatio);
+
+      // Overpaint sensitive regions with solid black on a composited copy.
+      // Doing this in the bitmap (rather than relying on the SankofaMask
+      // widget painting black during capture) guarantees masking even across
+      // route transitions / un-repainted frames — closing the mask-transition
+      // race — and covers auto-detected inputs the host never wrapped.
+      final masked = await _applyMasks(image, maskRects);
+      final byteData =
+          await masked.toByteData(format: ui.ImageByteFormat.png);
+      masked.dispose();
 
       if (byteData != null) {
         _frameBuffer.add(byteData.buffer.asUint8List());
         _frameTimestamps.add(captureTimestampMs);
+        _enforceBufferCaps();
         if (_frameBuffer.length >= 5) flush();
       }
     } catch (e) {
@@ -207,6 +267,74 @@ class SankofaReplayRecorder {
     } finally {
       _isCapturingFrame = false;
     }
+  }
+
+  /// Walk the render tree under [boundary] and return the rects (logical
+  /// coordinates, relative to the boundary) of every surface that must be
+  /// masked per the active privacy policy: all obscured text fields always;
+  /// all text inputs when [_maskAllInputs]; explicit [SankofaMask] regions
+  /// always; Text when [_maskAllText]; Image when [_maskAllImages].
+  List<Rect> _collectMaskRects(RenderObject boundary) {
+    final rects = <Rect>[];
+    final ctx = rootBoundaryKey.currentContext;
+    if (ctx == null) return rects;
+
+    void visit(Element element) {
+      if (rects.length > 400) return; // safety bound
+      final widget = element.widget;
+      final ro = element.renderObject;
+
+      bool shouldMask = false;
+      if (widget is EditableText) {
+        // Always mask obscured (password) fields; mask all inputs when asked.
+        shouldMask = _maskAllInputs || widget.obscureText;
+      } else if (widget is SankofaMask) {
+        shouldMask = true;
+      } else if (widget is Image && _maskAllImages) {
+        shouldMask = true;
+      } else if (widget is Text && _maskAllText) {
+        shouldMask = true;
+      }
+
+      if (shouldMask && ro is RenderBox && ro.hasSize && ro.attached) {
+        try {
+          final origin = ro.localToGlobal(Offset.zero, ancestor: boundary);
+          rects.add(origin & ro.size);
+        } catch (_) {/* detached mid-walk — skip */}
+      }
+      element.visitChildren(visit);
+    }
+
+    ctx.visitChildElements(visit);
+    return rects;
+  }
+
+  /// Composite [image] with solid-black rectangles over each masked region.
+  /// [maskRects] are in logical coordinates; they're scaled by
+  /// [_capturePixelRatio] to match the rasterized image. Returns the original
+  /// image untouched when there's nothing to mask.
+  Future<ui.Image> _applyMasks(ui.Image image, List<Rect> maskRects) async {
+    if (maskRects.isEmpty) return image;
+    final recorder = ui.PictureRecorder();
+    final canvas = Canvas(recorder);
+    canvas.drawImage(image, Offset.zero, Paint());
+    final blackout = Paint()..color = const Color(0xFF000000);
+    for (final r in maskRects) {
+      canvas.drawRect(
+        Rect.fromLTWH(
+          r.left * _capturePixelRatio,
+          r.top * _capturePixelRatio,
+          r.width * _capturePixelRatio,
+          r.height * _capturePixelRatio,
+        ),
+        blackout,
+      );
+    }
+    final picture = recorder.endRecording();
+    final out = await picture.toImage(image.width, image.height);
+    picture.dispose();
+    image.dispose(); // source no longer needed; caller disposes `out`
+    return out;
   }
   
   void _captureUIBlueprint() {
@@ -255,7 +383,16 @@ class SankofaReplayRecorder {
               String? value;
               if (widget is Text) {
                 type = 'text';
-                value = widget.data ?? widget.textSpan?.toPlainText();
+                final raw = widget.data ?? widget.textSpan?.toPlainText();
+                // Redact rendered text content when masking is on — the
+                // wireframe is sold as privacy-focused but otherwise ships
+                // visible text (balances, names, messages) verbatim. We keep
+                // the length (as bullets) so layout/heatmap stay meaningful.
+                if (_maskAllText && raw != null) {
+                  value = '•' * raw.length;
+                } else {
+                  value = raw;
+                }
               } else if (widget is Image || widget is Icon) {
                 type = 'media';
               } else if (widget is ButtonStyleButton || widget is IconButton) {

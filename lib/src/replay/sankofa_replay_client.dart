@@ -71,6 +71,9 @@ class SankofaReplay {
     int fps = 1,
     bool debug = false,
     Map<String, String> deviceProperties = const {},
+    bool maskAllInputs = true,
+    bool maskAllText = false,
+    bool maskAllImages = false,
   }) async {
     _debug = debug;
     _uploader.updateConfig(
@@ -84,6 +87,9 @@ class SankofaReplay {
       mode: mode,
       fps: fps,
       sessionId: sessionId,
+      maskAllInputs: maskAllInputs,
+      maskAllText: maskAllText,
+      maskAllImages: maskAllImages,
     );
   }
 

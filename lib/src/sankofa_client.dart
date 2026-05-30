@@ -486,6 +486,7 @@ class Sankofa {
           fps: replayFps,
           debug: debug,
           deviceProperties: _defaultProperties,
+          maskAllInputs: config.maskAllInputs,
         );
       },
     );

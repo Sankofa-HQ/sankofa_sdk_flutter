@@ -14,7 +14,16 @@ class SankofaReplayUploader {
   String _sessionId = '';
   String _distinctId = 'anonymous';
   int _chunkIndex = 0;
-  bool _isUploading = false;
+
+  /// Serializes uploads so two chunks never POST concurrently AND no chunk is
+  /// dropped. Previously a boolean `_isUploading` guard early-returned (and
+  /// silently discarded) any chunk that arrived while one was in flight.
+  Future<void> _uploadChain = Future.value();
+
+  /// Completes once the persisted chunk index for the current session has been
+  /// loaded. Awaited before the first upload so a process-restart mid-session
+  /// can't reuse index 0 and clobber an already-uploaded chunk.
+  Future<void>? _chunkIndexLoad;
 
   String get sessionId => _sessionId;
   int get chunkIndex => _chunkIndex;
@@ -33,7 +42,7 @@ class SankofaReplayUploader {
   }) {
     if (_sessionId != sessionId) {
       _sessionId = sessionId;
-      _loadChunkIndex();
+      _chunkIndexLoad = _loadChunkIndex();
     }
     _apiKey = apiKey;
     _endpoint = endpoint;
@@ -48,7 +57,10 @@ class SankofaReplayUploader {
     _chunkIndex = prefs.getInt('sankofa_replay_chunk_$_sessionId') ?? 0;
   }
 
-  Future<void> uploadChunk({
+  /// Upload a chunk. Returns true on confirmed delivery (2xx) so the caller can
+  /// retain-and-retry the data on failure rather than losing it. Uploads run
+  /// strictly one-at-a-time via [_uploadChain].
+  Future<bool> uploadChunk({
     required SankofaReplayMode mode,
     required List<Uint8List> frames,
     // Per-frame capture timestamps in lockstep with [frames].  Empty
@@ -59,10 +71,36 @@ class SankofaReplayUploader {
     required List<Map<String, dynamic>> events,
     required DateTime? startTime,
     required Map<String, dynamic> deviceContext,
-  }) async {
-    if (_isUploading || _sessionId.isEmpty) return;
-    _isUploading = true;
+  }) {
+    if (_sessionId.isEmpty) return Future.value(false);
+    final result = _uploadChain.then((_) => _doUpload(
+          mode: mode,
+          frames: frames,
+          frameTimestamps: frameTimestamps,
+          events: events,
+          startTime: startTime,
+          deviceContext: deviceContext,
+        ));
+    // Keep the chain alive regardless of this upload's outcome.
+    _uploadChain = result.then((_) {}, onError: (_) {});
+    return result;
+  }
 
+  Future<bool> _doUpload({
+    required SankofaReplayMode mode,
+    required List<Uint8List> frames,
+    List<int> frameTimestamps = const [],
+    required List<Map<String, dynamic>> events,
+    required DateTime? startTime,
+    required Map<String, dynamic> deviceContext,
+  }) async {
+    // Ensure the persisted chunk index has loaded before the first POST.
+    if (_chunkIndexLoad != null) {
+      try {
+        await _chunkIndexLoad;
+      } catch (_) {}
+      _chunkIndexLoad = null;
+    }
     try {
       final appVersion = _deviceProperties['\$app_version'] ?? 'unknown';
       final deviceContextWithOs = {
@@ -136,13 +174,17 @@ class SankofaReplayUploader {
         _chunkIndex++;
         final prefs = await SharedPreferences.getInstance();
         await prefs.setInt('sankofa_replay_chunk_$_sessionId', _chunkIndex);
-      } else {
-        logger('❌ Replay upload failed: ${resp.statusCode}');
+        return true;
       }
+      // 4xx (except 408/429) won't succeed on retry → report as "handled"
+      // (true) so the recorder drops it; 408/429/5xx are transient → false.
+      final code = resp.statusCode;
+      final transient = code == 408 || code == 429 || code >= 500;
+      logger('❌ Replay upload failed: $code${transient ? ' (will retry)' : ' (dropping)'}');
+      return !transient;
     } catch (e) {
-      logger('❌ Replay upload error: $e');
-    } finally {
-      _isUploading = false;
+      logger('❌ Replay upload error: $e (will retry)');
+      return false; // network error — transient, retain for retry
     }
   }
 }
