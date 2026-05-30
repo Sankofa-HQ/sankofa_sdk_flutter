@@ -192,6 +192,10 @@ class Sankofa {
 
   SankofaReplayConfig? _replayConfig;
   bool _isInitialized = false;
+  // Re-entrancy guard: prevents two overlapping init() calls (rebuild, hot
+  // restart, failed-then-retry) from both proceeding and double-registering
+  // observers / leaking a second flush timer + presence heartbeat.
+  bool _initializing = false;
   Timer? _flushTimer;
 
   // Cached copies of the init-time credentials so modules constructed
@@ -297,6 +301,9 @@ class Sankofa {
     bool enableDeploy = false,
     SankofaDeployOptions deployOptions = const SankofaDeployOptions(),
   }) async {
+    // Re-entrancy guard — ignore overlapping init() calls.
+    if (_initializing) return;
+    _initializing = true;
     if (_isInitialized) await dispose();
 
     _apiKey = apiKey;
@@ -516,13 +523,23 @@ class Sankofa {
     _defaultProperties.addAll(networkProps);
 
     await _sessionManager.refresh();
-    
-    // First Time Open Logic
+
+    // Mark ready SYNCHRONOUSLY now — every core dependency (_identity,
+    // _queueManager, _sessionManager, _defaultProperties) is assigned and
+    // loaded. Doing this BEFORE registering the lifecycle/deep-link observers,
+    // the flush timer, and the presence heartbeat closes the half-built-state
+    // window where an observer callback could fire into a not-yet-ready SDK
+    // and silently drop the first lifecycle/screen events.
+    _isInitialized = true;
+
+    // First Time Open Logic. Enqueue the event BEFORE flipping the persisted
+    // flag so a process death between the two re-fires it next launch rather
+    // than silently losing first-open.
     final prefs = await SharedPreferences.getInstance();
     const firstOpenKey = 'dev.sankofa.first_open_detected';
     if (!(prefs.getBool(firstOpenKey) ?? false)) {
-      await prefs.setBool(firstOpenKey, true);
       await track('\$app_open_first_time');
+      await prefs.setBool(firstOpenKey, true);
     }
 
     _deepLinks.init();
@@ -563,7 +580,7 @@ class Sankofa {
 
     await track('\$session_start');
 
-    _isInitialized = true;
+    _initializing = false;
     _logger.log('⚡ Sankofa initialized');
   }
   
@@ -661,6 +678,9 @@ class Sankofa {
     if (!_isInitialized) return;
     await _queueManager.flush();
     await _identity.reset();
+    // Re-point replay at the new anonymous id — otherwise post-logout frames
+    // keep being attributed to the previous (identified) user.
+    SankofaReplay.instance.setDistinctId(_identity.distinctId);
     await _sessionManager.startNewSession();
   }
 

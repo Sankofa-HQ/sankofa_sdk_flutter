@@ -14,32 +14,46 @@ class SankofaSessionManager {
 
   String? get sessionId => _sessionId;
 
+  static const int _timeoutMs = kSessionTimeoutMinutes * 60 * 1000;
+
   Future<void> refresh() async {
     final prefs = await SharedPreferences.getInstance();
     _sessionId = prefs.getString(kSessionIdKey);
 
     if (_sessionId == null) {
       await startNewSession();
-    } else {
-      await onNewSession();
+      return;
     }
+
+    // Cold-start timeout: if the app was last backgrounded longer than the
+    // session timeout ago, the persisted session is stale. Rotate instead of
+    // reusing it — otherwise a session can span days across kill/relaunch and
+    // corrupt every session-scoped metric. (Previously the timeout was only
+    // enforced on a warm resume, never on a cold launch.)
+    final lastBackground = prefs.getInt(kLastBackgroundTimeKey) ?? 0;
+    if (lastBackground != 0 &&
+        DateTime.now().millisecondsSinceEpoch - lastBackground > _timeoutMs) {
+      logger.log('⌛ Cold start after long background — rotating stale session');
+      await startNewSession();
+      await prefs.remove(kLastBackgroundTimeKey);
+      return;
+    }
+
+    await onNewSession();
   }
 
   /// Called when the app is resumed.
-  /// If the app has been in the background for more than 30 minutes, 
+  /// If the app has been in the background longer than the session timeout,
   /// we rotate the session and return true.
   Future<bool> checkRotationOnResume() async {
     final prefs = await SharedPreferences.getInstance();
     final lastBackground = prefs.getInt(kLastBackgroundTimeKey) ?? 0;
-    
+
     if (lastBackground == 0) return false;
 
-    final now = DateTime.now().millisecondsSinceEpoch;
-    final elapsed = now - lastBackground;
-    const thirtyMinutes = 30 * 60 * 1000;
-
-    if (elapsed > thirtyMinutes) {
-      logger.log('⌛ Session timed out after ${elapsed / 60000} minutes. Rotating.');
+    final elapsed = DateTime.now().millisecondsSinceEpoch - lastBackground;
+    if (elapsed > _timeoutMs) {
+      logger.log('⌛ Session timed out after ${elapsed ~/ 60000} minutes. Rotating.');
       await startNewSession();
       await prefs.remove(kLastBackgroundTimeKey);
       return true;

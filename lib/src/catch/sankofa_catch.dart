@@ -360,9 +360,13 @@ class SankofaCatch implements SankofaModule {
         } catch (_) {
           /* never throw from our own handler */
         }
-        // Chain; return true so async errors continue to propagate
-        // according to the host's own policy.
-        return _previousPlatformOnError?.call(error, stackTrace) ?? true;
+        // Chain to the host's handler if it set one. If it didn't, return
+        // FALSE so Flutter's DEFAULT error propagation is preserved (the
+        // framework reports the error). Returning true here would mark every
+        // uncaught async error "handled" and silently swallow it for hosts
+        // that never installed their own onError — a behavioural change just
+        // from integrating Catch.
+        return _previousPlatformOnError?.call(error, stackTrace) ?? false;
       };
 
       // ── Isolate error listener ─────────────────────────────────

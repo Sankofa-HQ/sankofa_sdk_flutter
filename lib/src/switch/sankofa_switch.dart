@@ -39,6 +39,9 @@ class SankofaSwitch implements SankofaModule {
   final Map<String, FlagDecision> _defaults;
   final Map<String, Set<FlagChangeListener>> _listeners = {};
   bool _hydrated = false;
+  // True once a handshake has populated _flags, so a late _hydrate() can't
+  // clobber fresh server flags with the stale disk cache.
+  bool _appliedHandshake = false;
 
   /// [defaults] are returned synchronously when the handshake hasn't
   /// completed yet AND no persisted cache exists. The wire shape is
@@ -73,11 +76,16 @@ class SankofaSwitch implements SankofaModule {
       });
     }
     final diff = _diff(incoming);
+    // Snapshot the value to deliver per changed key BEFORE the await, from the
+    // local `incoming` — so a concurrent handshake reassigning _flags during
+    // _persist() can't make _fire deliver the wrong variant.
+    final changedValues = {for (final k in diff.changed) k: incoming[k]};
     _flags = incoming;
+    _appliedHandshake = true;
     _etag = (config['etag'] as String?) ?? '';
     _savedAtMs = DateTime.now().millisecondsSinceEpoch;
     await _persist();
-    _fire(diff.changed, diff.removed);
+    _fire(changedValues, diff.removed);
   }
 
   /// Self-audit the host's Switch integration. Mirrors Deploy + RN.
@@ -187,6 +195,8 @@ class SankofaSwitch implements SankofaModule {
       }
       final flagsRaw = parsed['flags'] as Map<String, dynamic>?;
       if (flagsRaw == null) return;
+      // Don't clobber a handshake that landed while we read from disk.
+      if (_appliedHandshake || _flags.isNotEmpty) return;
       final rebuilt = <String, FlagDecision>{};
       flagsRaw.forEach((k, v) {
         if (v is Map<String, dynamic>) {
@@ -199,7 +209,7 @@ class SankofaSwitch implements SankofaModule {
       // Fire listeners attached before hydrate completed — they
       // registered with an empty set, so every cached key looks "new"
       // to them.
-      _fire(_flags.keys.toSet(), <String>{});
+      _fire({for (final k in _flags.keys) k: _flags[k]}, <String>{});
     } catch (_) {
       // Corrupt JSON — ignore, next apply() overwrites.
     } finally {
@@ -233,11 +243,12 @@ class SankofaSwitch implements SankofaModule {
     return _Diff(changed: changed, removed: removed);
   }
 
-  void _fire(Set<String> changed, Set<String> removed) {
-    for (final key in changed) {
+  void _fire(Map<String, FlagDecision?> changed, Set<String> removed) {
+    for (final entry in changed.entries) {
+      final key = entry.key;
       final bucket = _listeners[key];
       if (bucket == null) continue;
-      final decision = _flags[key];
+      final decision = entry.value;
       for (final listener in bucket) {
         try {
           listener(decision);

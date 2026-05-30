@@ -1,4 +1,3 @@
-import 'dart:ui';
 import 'package:flutter/widgets.dart';
 import 'replay/sankofa_replay.dart';
 import 'utils/logger.dart';
@@ -37,27 +36,43 @@ class SankofaLifecycleObserver with WidgetsBindingObserver {
     _handleAppLifecycleStateChanged(state);
   }
 
+  // Serialize lifecycle handlers so a rapid background→foreground bounce
+  // (lock screen, app-switcher peek) can't interleave _handleBackground
+  // (writes last_background_time) with _handleResume (reads it) and produce
+  // spurious or missed session rotations.
+  Future<void> _chain = Future.value();
+  void _enqueue(Future<void> Function() op) {
+    _chain = _chain.then((_) => op()).catchError((_) {});
+  }
+
   void _handleAppLifecycleStateChanged(AppLifecycleState state) {
     logger.log('📱 AppLifecycleState: $state');
 
     switch (state) {
       case AppLifecycleState.resumed:
-        _handleResume();
-        break;
-      case AppLifecycleState.inactive:
-      case AppLifecycleState.hidden:
-        _handleBackground();
+        _enqueue(_handleResume);
         break;
       case AppLifecycleState.paused:
+      case AppLifecycleState.hidden:
+        // The canonical "really backgrounded" states. NOT `inactive`, which
+        // on iOS fires transiently for control center / a call banner / the
+        // app-switcher peek — treating it as background inflated
+        // $app_backgrounded and stamped bogus background times that drove
+        // false 30-min rotations.
+        _enqueue(_handleBackground);
         break;
+      case AppLifecycleState.inactive:
+        break; // transient — ignore
       case AppLifecycleState.detached:
-        if (trackLifecycleEvents) track('\$app_terminated');
-        flush();
+        _enqueue(() async {
+          if (trackLifecycleEvents) await track('\$app_terminated');
+          await flush();
+        });
         break;
     }
   }
 
-  void _handleResume() async {
+  Future<void> _handleResume() async {
     final rotated = await sessionManager.checkRotationOnResume();
     if (rotated) {
       await track('\$session_start');
@@ -69,7 +84,7 @@ class SankofaLifecycleObserver with WidgetsBindingObserver {
     }
   }
 
-  void _handleBackground() async {
+  Future<void> _handleBackground() async {
     await sessionManager.setLastBackgroundTime();
 
     if (trackLifecycleEvents) {

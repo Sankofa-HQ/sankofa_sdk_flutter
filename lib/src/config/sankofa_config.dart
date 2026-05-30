@@ -33,6 +33,9 @@ class SankofaConfig implements SankofaModule {
   final Map<String, ItemDecision> _defaults;
   final Map<String, Set<ConfigChangeListener>> _listeners = {};
   bool _hydrated = false;
+  // True once a server handshake has populated _values, so a late-completing
+  // _hydrate() doesn't clobber fresh server data with the stale disk cache.
+  bool _appliedHandshake = false;
 
   /// [defaults] are the fallbacks used when the handshake hasn't
   /// landed and no persisted cache exists. They must be the full
@@ -64,11 +67,17 @@ class SankofaConfig implements SankofaModule {
       });
     }
     final diff = _diff(incoming);
+    // Capture the value to deliver for each changed key NOW, from the local
+    // `incoming` map — before the await below. Otherwise a second concurrent
+    // applyHandshake could reassign `_values` during _persist() and _fire
+    // would deliver the other handshake's value (or null) for this diff.
+    final changedValues = {for (final k in diff.changed) k: incoming[k]};
     _values = incoming;
+    _appliedHandshake = true;
     _etag = (config['etag'] as String?) ?? '';
     _savedAtMs = DateTime.now().millisecondsSinceEpoch;
     await _persist();
-    _fire(diff.changed, diff.removed);
+    _fire(changedValues, diff.removed);
   }
 
   /// Self-audit the host's Config integration. Mirrors Switch + RN.
@@ -123,6 +132,18 @@ class SankofaConfig implements SankofaModule {
     // emits both as `num` over JSON; Dart clients may ask for either.
     if (T == double && v is num) return v.toDouble() as T;
     if (T == int && v is num) return v.toInt() as T;
+    // Bool coercion — a dashboard item declared as a number (1/0) or string
+    // ("true"/"false"/"1"/"0") read as bool by the client used to silently
+    // return the default. Accept the common cross-type encodings.
+    if (T == bool) {
+      if (v is num) return (v != 0) as T;
+      if (v is String) {
+        final s = v.trim().toLowerCase();
+        if (s == 'true' || s == '1') return true as T;
+        if (s == 'false' || s == '0') return false as T;
+      }
+      return defaultValue;
+    }
     return defaultValue;
   }
 
@@ -177,6 +198,9 @@ class SankofaConfig implements SankofaModule {
       }
       final valuesRaw = parsed['values'] as Map<String, dynamic>?;
       if (valuesRaw == null) return;
+      // A handshake may have landed while we were reading from disk — never
+      // overwrite fresh server data with the stale cache.
+      if (_appliedHandshake || _values.isNotEmpty) return;
       final rebuilt = <String, ItemDecision>{};
       valuesRaw.forEach((k, v) {
         if (v is Map<String, dynamic>) {
@@ -186,7 +210,7 @@ class SankofaConfig implements SankofaModule {
       _values = rebuilt;
       _etag = parsed['etag'] as String? ?? '';
       _savedAtMs = savedAt;
-      _fire(_values.keys.toSet(), <String>{});
+      _fire({for (final k in _values.keys) k: _values[k]}, <String>{});
     } catch (_) {
       // Corrupt JSON — ignore, next apply() overwrites.
     } finally {
@@ -220,11 +244,12 @@ class SankofaConfig implements SankofaModule {
     return _Diff(changed: changed, removed: removed);
   }
 
-  void _fire(Set<String> changed, Set<String> removed) {
-    for (final key in changed) {
+  void _fire(Map<String, ItemDecision?> changed, Set<String> removed) {
+    for (final entry in changed.entries) {
+      final key = entry.key;
       final bucket = _listeners[key];
       if (bucket == null) continue;
-      final decision = _values[key];
+      final decision = entry.value;
       for (final listener in bucket) {
         try {
           listener(decision);
