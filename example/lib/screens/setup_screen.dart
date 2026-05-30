@@ -11,8 +11,11 @@ import 'event_tester_screen.dart';
 const String setupPrefsEngineUrl = 'sankofa.example.endpoint';
 const String setupPrefsApiKey = 'sankofa.example.apiKey';
 const String setupDefaultEngineUrl = 'https://api.sankofa.dev';
-// Pre-filled so the example connects to the live server in one tap.
-const String setupDefaultApiKey = '';
+// Never commit a real key. Supply one at build time for a one-tap demo:
+//   flutter run --dart-define=SANKOFA_API_KEY=sk_live_...
+// Otherwise the form opens empty and you paste a key manually.
+const String setupDefaultApiKey =
+    String.fromEnvironment('SANKOFA_API_KEY', defaultValue: '');
 
 class SetupScreen extends StatefulWidget {
   const SetupScreen({super.key});
