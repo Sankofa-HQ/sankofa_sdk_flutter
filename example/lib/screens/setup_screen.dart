@@ -10,7 +10,9 @@ import 'event_tester_screen.dart';
 /// at the other.
 const String setupPrefsEngineUrl = 'sankofa.example.endpoint';
 const String setupPrefsApiKey = 'sankofa.example.apiKey';
-const String setupDefaultEngineUrl = 'http://localhost:8080';
+const String setupDefaultEngineUrl = 'https://api.sankofa.dev';
+// Pre-filled so the example connects to the live server in one tap.
+const String setupDefaultApiKey = '';
 
 class SetupScreen extends StatefulWidget {
   const SetupScreen({super.key});
@@ -28,7 +30,9 @@ class _SetupScreenState extends State<SetupScreen>
   late final _engineUrlController = TextEditingController(
     text: setupDefaultEngineUrl,
   );
-  final _apiKeyController = TextEditingController();
+  late final _apiKeyController = TextEditingController(
+    text: setupDefaultApiKey,
+  );
 
   bool _connecting = false;
   bool _hydrating = true;
@@ -66,8 +70,11 @@ class _SetupScreenState extends State<SetupScreen>
       final savedKey = prefs.getString(setupPrefsApiKey)?.trim() ?? '';
       final savedUrl = prefs.getString(setupPrefsEngineUrl)?.trim() ?? '';
       if (savedUrl.isNotEmpty) _engineUrlController.text = savedUrl;
-      if (savedKey.isNotEmpty) {
-        _apiKeyController.text = savedKey;
+      if (savedKey.isNotEmpty) _apiKeyController.text = savedKey;
+      // Auto-connect when we have a key — a saved one OR the shipped default
+      // (the demo ships with a working live key + endpoint, so first launch
+      // lands straight in the demo instead of an empty form).
+      if (_apiKeyController.text.trim().isNotEmpty) {
         // Defer to a microtask so the build phase doesn't see an
         // in-flight `Navigator.pushReplacement`.
         await Future.microtask(() => _connect(autoConnect: true));
