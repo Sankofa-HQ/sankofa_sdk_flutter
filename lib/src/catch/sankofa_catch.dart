@@ -1,6 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io' show Platform;
+import 'dart:io' show Platform, File, Directory, FileMode;
 import 'dart:isolate';
 import 'dart:math' show Random;
 import 'dart:ui';
@@ -9,6 +9,7 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../sankofa_constants.dart';
 import '../core/module_registry.dart';
 import '../sankofa_client.dart';
 import '../switch/sankofa_switch.dart';
@@ -38,6 +39,18 @@ class SankofaCatch implements SankofaModule {
   static const int _defaultBatchSize = 20;
   static const Duration _flushInterval = Duration(seconds: 5);
   static const int _maxStorageBytes = 512 * 1024;
+
+  /// Crash spool filename. Fatal events are appended here SYNCHRONOUSLY on the
+  /// crash path (SharedPreferences is async-only and almost never completes
+  /// before a hard crash tears the process down). Drained + deleted on the
+  /// next launch. JSON-lines format, one event per line.
+  static const String _crashSpoolName = 'sankofa_catch_crash.jsonl';
+
+  /// Events recovered from disk on launch, kept as raw JSON maps so the full
+  /// payload (exception, stacktrace, breadcrumbs, device, …) round-trips
+  /// losslessly and is resent verbatim — the previous decoder dropped
+  /// everything but type/message/tags, making recovered crashes unusable.
+  final List<Map<String, dynamic>> _recovered = [];
 
   /// Singleton accessor for the active Catch instance.  Set the first
   /// time [SankofaCatch] is constructed (typically during
@@ -239,34 +252,48 @@ class SankofaCatch implements SankofaModule {
 
   /// Flush pending events to the server. No-op if empty.
   Future<void> flush() async {
-    if (_buffer.isEmpty) return;
-    final batch = List<CatchEvent>.from(_buffer);
+    if (_buffer.isEmpty && _recovered.isEmpty) return;
+
+    // Build the outgoing batch: recovered (oldest) first, then live events.
+    final batch = <Map<String, dynamic>>[
+      ..._recovered,
+      ..._buffer.map((e) => e.toJson()),
+    ];
+    _recovered.clear();
     _buffer.clear();
     await _persist();
 
     final endpoint = Sankofa.instance.endpoint;
     final apiKey = Sankofa.instance.apiKey;
     if (endpoint == null || apiKey == null) {
-      // Config unavailable — restore buffer so next tick tries again.
-      _buffer.insertAll(0, batch);
+      // Config unavailable — restore so the next tick tries again.
+      _recovered.insertAll(0, batch);
       await _persist();
       return;
     }
 
     final url = Uri.parse('${endpoint.replaceAll(RegExp(r'/$'), '')}/api/catch/events');
     try {
-      await http.post(
+      final res = await http.post(
         url,
         headers: {'Content-Type': 'application/json', 'x-api-key': apiKey},
-        body: jsonEncode({
-          'wire_version': kCatchWireVersion,
-          'events': batch.map((e) => e.toJson()).toList(),
-        }),
+        body: jsonEncode({'wire_version': kCatchWireVersion, 'events': batch}),
       );
+      final code = res.statusCode;
+      // 2xx = delivered. 4xx (except 408/429) = client error that won't ever
+      // succeed → drop. 408/429/5xx → retain for retry.
+      if (code == 408 || code == 429 || code >= 500) {
+        _recovered.insertAll(0, batch);
+        await _persist();
+      } else if (code >= 400) {
+        if (kDebugMode) {
+          debugPrint('[Sankofa Catch] batch rejected ($code) — dropping ${batch.length} event(s)');
+        }
+      }
     } catch (e) {
-      // Network failure — requeue so the next tick tries again.
+      // Network failure — retain so the next tick tries again.
       if (kDebugMode) debugPrint('[Sankofa Catch] flush failed: $e');
-      _buffer.insertAll(0, batch);
+      _recovered.insertAll(0, batch);
       await _persist();
     }
   }
@@ -393,7 +420,10 @@ class SankofaCatch implements SankofaModule {
     required CatchMechanism? mechanism,
   }) {
     if (!_enabled) return '';
-    if (!_shouldSample()) return '';
+    // Fatal/unhandled crashes are NEVER sampled out — they're the whole point
+    // of Catch. Only handled/console events are subject to the sample rate.
+    final isFatal = mechanism?.handled == false;
+    if (!isFatal && !_shouldSample()) return '';
 
     // Apply active withScope() overlay (if any). Layering order:
     //   global setUser/setTags/setExtra (read below)
@@ -430,7 +460,7 @@ class SankofaCatch implements SankofaModule {
       device: _buildDeviceContext(),
       release: release,
       platform: 'flutter',
-      sdk: {'name': 'sankofa.flutter', 'version': 'flutter-0.1.0'},
+      sdk: {'name': 'sankofa.flutter', 'version': kLibVersion},
       breadcrumbs: _breadcrumbs.snapshot(),
       fingerprint: mergedOptions?.fingerprint,
       flagSnapshot: readFlagSnapshot?.call() ?? _autoFlagSnapshot(),
@@ -459,11 +489,37 @@ class SankofaCatch implements SankofaModule {
     }
 
     _buffer.add(outgoing);
+    if (isFatal) {
+      // Durably spool the fatal SYNCHRONOUSLY before the process can die,
+      // and make a best-effort send now rather than waiting for the 5s timer.
+      _spoolFatalSync(outgoing);
+      unawaited(flush());
+    }
     unawaited(_persist());
     if (_buffer.length >= _defaultBatchSize) {
       unawaited(flush());
     }
     return outgoing.eventId;
+  }
+
+  /// Path to the crash spool file. Uses [Directory.systemTemp] (the app's
+  /// tmp dir on mobile) so it's resolvable SYNCHRONOUSLY on the crash path —
+  /// path_provider is async and unusable while the process is dying.
+  File get _crashSpoolFile =>
+      File('${Directory.systemTemp.path}/$_crashSpoolName');
+
+  /// Append a fatal event to the crash spool synchronously. Wrapped so a
+  /// storage failure can never make a crash worse.
+  void _spoolFatalSync(CatchEvent ev) {
+    try {
+      _crashSpoolFile.writeAsStringSync(
+        '${jsonEncode(ev.toJson())}\n',
+        mode: FileMode.append,
+        flush: true,
+      );
+    } catch (_) {
+      /* best-effort — never throw from the crash path */
+    }
   }
 
   String? _maybeAnonId() {
@@ -532,6 +588,7 @@ class SankofaCatch implements SankofaModule {
   Future<void> _hydrate() async {
     if (_hydrated) return;
     try {
+      // 1. SharedPreferences-persisted batch (graceful shutdowns / non-fatals).
       final prefs = await SharedPreferences.getInstance();
       final raw = prefs.getString(_queueKey);
       if (raw != null && raw.isNotEmpty) {
@@ -539,74 +596,72 @@ class SankofaCatch implements SankofaModule {
         if (decoded is List) {
           for (final entry in decoded) {
             if (entry is Map) {
-              _buffer.add(_eventFromJson(Map<String, dynamic>.from(entry)));
+              // Keep the raw JSON map — resend verbatim, no lossy decode.
+              _recovered.add(Map<String, dynamic>.from(entry));
             }
           }
-          if (kDebugMode) debugPrint('[Sankofa Catch] recovered ${_buffer.length} persisted events');
         }
       }
     } catch (_) {
       try {
         (await SharedPreferences.getInstance()).remove(_queueKey);
       } catch (_) {}
-    } finally {
-      _hydrated = true;
+    }
+
+    // 2. Crash spool (hard crashes that synchronously wrote a JSON line).
+    try {
+      final spool = _crashSpoolFile;
+      if (spool.existsSync()) {
+        for (final line in spool.readAsLinesSync()) {
+          if (line.trim().isEmpty) continue;
+          try {
+            final m = jsonDecode(line);
+            if (m is Map) _recovered.add(Map<String, dynamic>.from(m));
+          } catch (_) {/* skip a corrupt line */}
+        }
+        spool.deleteSync();
+      }
+    } catch (_) {/* spool unavailable — continue */}
+
+    _hydrated = true;
+    if (_recovered.isNotEmpty) {
+      if (kDebugMode) {
+        debugPrint('[Sankofa Catch] recovered ${_recovered.length} event(s) from last session');
+      }
+      // Send recovered crashes NOW rather than waiting for the 5s timer — the
+      // post-crash session is often too short for the timer to ever fire.
+      unawaited(flush());
     }
   }
 
   Future<void> _persist() async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      var serialised = jsonEncode(_buffer.map((e) => e.toJson()).toList());
-      while (serialised.length > _maxStorageBytes && _buffer.length > 1) {
-        _buffer.removeAt(0);
-        serialised = jsonEncode(_buffer.map((e) => e.toJson()).toList());
+      // Persist recovered (raw) + live events together; recovered first.
+      List<Map<String, dynamic>> all() => [
+            ..._recovered,
+            ..._buffer.map((e) => e.toJson()),
+          ];
+      var serialised = jsonEncode(all());
+      // Evict oldest until under the byte cap. Prefer evicting recovered
+      // (older) before live events.
+      while (serialised.length > _maxStorageBytes &&
+          (_recovered.length + _buffer.length) > 1) {
+        if (_recovered.isNotEmpty) {
+          _recovered.removeAt(0);
+        } else {
+          _buffer.removeAt(0);
+        }
+        serialised = jsonEncode(all());
       }
       await prefs.setString(_queueKey, serialised);
     } catch (_) {
       /* storage unavailable — continue */
     }
   }
-
-  /// Minimal decoder — covers the fields the persistence layer
-  /// round-trips. Good enough for recovery since we just need to
-  /// re-POST the batch; full fidelity is not required.
-  CatchEvent _eventFromJson(Map<String, dynamic> j) {
-    return CatchEvent(
-      eventId: j['event_id'] as String? ?? _randomId(),
-      tsMs: (j['ts_ms'] as int?) ?? DateTime.now().millisecondsSinceEpoch,
-      environment: j['environment'] as String? ?? environment,
-      level: _parseLevel(j['level'] as String?) ?? CatchLevel.error,
-      type: j['type'] as String? ?? 'unhandled_exception',
-      platform: j['platform'] as String? ?? 'flutter',
-      sdk: Map<String, String>.from(
-        (j['sdk'] as Map?)?.cast<String, String>() ??
-            {'name': 'sankofa.flutter', 'version': 'flutter-0.1.0'},
-      ),
-      message: j['message'] as String?,
-      tags: (j['tags'] as Map?)?.cast<String, String>(),
-      extra: (j['extra'] as Map?)?.cast<String, dynamic>(),
-    );
-  }
 }
 
 // ── Helpers ─────────────────────────────────────────────────────
-
-CatchLevel? _parseLevel(String? raw) {
-  switch (raw) {
-    case 'fatal':
-      return CatchLevel.fatal;
-    case 'error':
-      return CatchLevel.error;
-    case 'warning':
-      return CatchLevel.warning;
-    case 'info':
-      return CatchLevel.info;
-    case 'debug':
-      return CatchLevel.debug;
-  }
-  return null;
-}
 
 String _randomId() {
   final r = Random();

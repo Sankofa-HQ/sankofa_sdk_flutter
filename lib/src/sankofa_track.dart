@@ -1,4 +1,5 @@
 import 'package:uuid/uuid.dart';
+import 'sankofa_constants.dart';
 import 'utils/serialization_helper.dart';
 
 class SankofaTrack {
@@ -10,7 +11,7 @@ class SankofaTrack {
     Map<String, dynamic>? properties,
   }) {
     final serializedProperties = properties == null
-        ? const <String, String>{}
+        ? const <String, dynamic>{}
         : SerializationHelper.serializeTransportProperties(properties);
 
     return {
@@ -23,8 +24,10 @@ class SankofaTrack {
         ...serializedProperties,
       },
       'default_properties': defaultProperties,
-      'timestamp': '${DateTime.now().toUtc().toIso8601String().split('.')[0]}Z',
-      'lib_version': 'flutter-0.1.0',
+      // Keep millisecond precision so events fired in the same second keep a
+      // stable order instead of colliding on an identical timestamp.
+      'timestamp': DateTime.now().toUtc().toIso8601String(),
+      'lib_version': kLibVersion,
       'id': const Uuid().v4(),
     };
   }

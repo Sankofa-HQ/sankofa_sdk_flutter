@@ -31,10 +31,11 @@ void main() {
     );
   });
 
-  test('serializes nested transport values into stable strings', () {
+  test('serializes transport values preserving native JSON types', () {
     final serialized = SerializationHelper.serializeTransportProperties({
       'count': 42,
       'enabled': true,
+      'ratio': 1.5,
       'metadata': {
         'step': 3,
         'tags': ['signup', 'checkout'],
@@ -42,9 +43,17 @@ void main() {
       'sent_at': DateTime.utc(2026, 3, 13, 12, 30),
     });
 
-    expect(serialized['count'], '42');
-    expect(serialized['enabled'], 'true');
-    expect(serialized['metadata'], '{"step":3,"tags":["signup","checkout"]}');
+    // Numbers/bools keep their native JSON type (no stringification) so the
+    // backend can aggregate/filter numerically and facet on booleans.
+    expect(serialized['count'], 42);
+    expect(serialized['enabled'], true);
+    expect(serialized['ratio'], 1.5);
+    // Nested maps/lists are preserved as real JSON structures.
+    expect(serialized['metadata'], {
+      'step': 3,
+      'tags': ['signup', 'checkout'],
+    });
+    // Non-encodable scalars (DateTime) still degrade to an ISO string.
     expect(serialized['sent_at'], '2026-03-13T12:30:00.000Z');
   });
 

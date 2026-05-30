@@ -670,6 +670,7 @@ class Sankofa {
       distinctId: _identity.distinctId,
       sessionId: _sessionManager.sessionId!,
       properties: properties,
+      defaultProperties: _defaultProperties,
     );
     await _queueManager.add(event);
     await _queueManager.flush();
@@ -852,6 +853,7 @@ class Sankofa {
     _presence = null;
     _heatmapSnapshotter?.dispose();
     _heatmapSnapshotter = null;
+    _queueManager.dispose();
     SankofaReplay.instance.stopRecording();
   }
 

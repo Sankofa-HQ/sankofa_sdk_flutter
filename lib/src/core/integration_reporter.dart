@@ -26,10 +26,11 @@ import 'dart:io' show Platform;
 import 'package:http/http.dart' as http;
 
 import 'module_registry.dart';
+import '../sankofa_constants.dart';
 
-/// Hardcoded so the server can correlate report-shape changes with SDK
-/// versions. Bump in lockstep with `pubspec.yaml#version`.
-const String _sdkVersion = '0.1.0';
+/// Single source of truth for the SDK version (see [kSdkVersion]); the server
+/// correlates report-shape changes with SDK versions.
+const String _sdkVersion = kSdkVersion;
 
 /// Fire-and-forget POST of one or more module integration statuses.
 ///

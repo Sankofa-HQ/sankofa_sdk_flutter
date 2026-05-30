@@ -1,23 +1,17 @@
-import 'dart:convert';
-
 class SerializationHelper {
-  static Map<String, String> serializeTransportProperties(
+  /// Convert host-supplied properties into a JSON-safe map that PRESERVES
+  /// native types. Numbers stay numbers, bools stay bools, nested maps/lists
+  /// are kept as real JSON — so the backend can do numeric aggregation and
+  /// boolean faceting. Previously every scalar was stringified
+  /// (`42` → `"42"`, `true` → `"true"`), which silently broke all downstream
+  /// numeric/boolean analytics. Only genuinely non-encodable values fall back
+  /// to `toString()`.
+  static Map<String, dynamic> serializeTransportProperties(
     Map<String, dynamic> properties,
   ) {
     return properties.map(
-      (key, value) => MapEntry(key, _serializeTransportValue(value)),
+      (key, value) => MapEntry(key, _toEncodableJson(value)),
     );
-  }
-
-  static String _serializeTransportValue(dynamic value) {
-    if (value == null) return 'null';
-    if (value is String) return value;
-    if (value is num || value is bool) return value.toString();
-    if (value is DateTime) return value.toIso8601String();
-    if (value is Iterable || value is Map) {
-      return jsonEncode(_toEncodableJson(value));
-    }
-    return value.toString();
   }
 
   static dynamic _toEncodableJson(dynamic value) {

@@ -1,4 +1,5 @@
 import 'package:uuid/uuid.dart';
+import 'sankofa_constants.dart';
 import 'utils/serialization_helper.dart';
 
 class SankofaPeople {
@@ -6,6 +7,7 @@ class SankofaPeople {
     required String distinctId,
     required String sessionId,
     required Map<String, dynamic> properties,
+    Map<String, String> defaultProperties = const {},
   }) {
     return {
       'type': 'people',
@@ -14,7 +16,9 @@ class SankofaPeople {
         r'$session_id': sessionId,
         ...SerializationHelper.serializeTransportProperties(properties),
       },
-      'timestamp': '${DateTime.now().toUtc().toIso8601String().split('.')[0]}Z',
+      'default_properties': defaultProperties,
+      'timestamp': DateTime.now().toUtc().toIso8601String(),
+      'lib_version': kLibVersion,
       'id': const Uuid().v4(),
     };
   }
