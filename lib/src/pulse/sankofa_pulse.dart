@@ -4,6 +4,7 @@ import 'dart:io' show Platform;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:package_info_plus/package_info_plus.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../core/module_registry.dart';
 import '../replay/sankofa_replay.dart';
@@ -35,7 +36,7 @@ import 'translator.dart';
 /// [applyHandshake]; survey *content* still comes from the dedicated
 /// `/api/pulse/handshake` because the unified handshake only carries
 /// enable/disable + tier gating, not the survey graph.
-class SankofaPulse implements SankofaModule {
+class SankofaPulse with WidgetsBindingObserver implements SankofaModule {
   SankofaPulse._();
 
   static final SankofaPulse instance = SankofaPulse._();
@@ -46,11 +47,31 @@ class SankofaPulse implements SankofaModule {
   /// [activeMatchingSurveys] run the eligibility evaluator without
   /// fetching a full bundle for every cached survey.
   Map<String, List<PulseTargetingRule>> _targetingRules = const {};
+
+  /// Per-survey display behaviour (auto_show / cooldown / delay), populated
+  /// alongside [_cached]. Drives [maybeAutoShow].
+  Map<String, _SurveyDisplay> _display = const {};
+
   PulseQueue? _queue;
   bool _registered = false;
   bool _enabled = true;
   List<PulseSurvey> _cached = const [];
   Future<void>? _refreshFuture;
+
+  /// Host-registered navigator key, used as the presentation anchor for
+  /// auto-show (which has no BuildContext of its own). The host must pass the
+  /// SAME key to `MaterialApp(navigatorKey: ...)`.
+  GlobalKey<NavigatorState>? _navigatorKey;
+
+  /// Master switch for auto-show — mirrors the web `autoShow:false` opt-out.
+  bool autoShowEnabled = true;
+
+  /// Survey ids already auto-shown this process, so a resume/refresh
+  /// re-trigger doesn't re-present the same survey on a zero cooldown.
+  final Set<String> _shownThisSession = <String>{};
+
+  /// True while a survey dialog is on screen — suppresses auto-show stacking.
+  bool _presenting = false;
 
   /// Lifecycle event listener registry. Per-event buckets so an
   /// `onCompleted` subscriber doesn't run for `dismissed` events.
@@ -62,6 +83,17 @@ class SankofaPulse implements SankofaModule {
   /// True once [register] has been called and we have a working
   /// client.
   bool get isRegistered => _registered;
+
+  /// Register the host's navigator key so auto-show can present a survey
+  /// without a host-supplied BuildContext. Pass the SAME
+  /// `GlobalKey<NavigatorState>` to your `MaterialApp(navigatorKey: key)`.
+  /// Without it, surveys flagged `auto_show` in the dashboard cannot
+  /// auto-present (the host must call [show] with a context instead).
+  void setNavigatorKey(GlobalKey<NavigatorState> key) {
+    _navigatorKey = key;
+    // A key registered after the first fetch should still trigger a survey.
+    if (_registered) maybeAutoShow();
+  }
 
   /// Wires Pulse to the host's already-initialised Sankofa SDK.
   /// Idempotent — calling twice is a no-op. Returns false if the
@@ -84,6 +116,8 @@ class SankofaPulse implements SankofaModule {
     _queue = PulseQueue();
     _registered = true;
     SankofaModuleRegistry.instance.register(this);
+    // Re-evaluate auto-show on app foreground (mirrors iOS/Android).
+    WidgetsBinding.instance.addObserver(this);
     // App version comes from a platform channel — load it once now
     // so submit-time enrichment doesn't have to wait on it.
     unawaited(_loadAppVersion());
@@ -193,9 +227,11 @@ class SankofaPulse implements SankofaModule {
     return out;
   }
 
-  /// Forces a refresh of the cached survey list from the server.
-  /// Useful right after identify().
-  Future<void> refreshSurveys() => _refreshSurveys();
+  /// Forces a refresh of the cached survey list from the server. Useful right
+  /// after identify() — bypasses the in-flight-coalescing AND the list cache
+  /// so the new identity's targeting is re-evaluated rather than returning the
+  /// previous user's cached result.
+  Future<void> refreshSurveys() => _refreshSurveys(force: true);
 
   // ── Lifecycle event subscriptions ───────────────────────────────────
 
@@ -371,12 +407,19 @@ class SankofaPulse implements SankofaModule {
     required Map<String, Object?> flags,
   }) {
     if (rules.isEmpty) return const PulseDecision(eligible: true);
-    final identity = Sankofa.instance.identity;
+    final host = Sankofa.instance;
+    final identity = host.identity;
+    // Populate the current screen so `screen`/`url` targeting rules can match.
+    // Without this every screen-targeted survey was permanently ineligible on
+    // Flutter (the evaluator saw an empty screenName).
+    final screen = host.hasTaggedScreen ? host.currentScreen : null;
     final ctx = PulseEligibilityContext(
       surveyId: surveyId,
       respondentExternalId: identity?.distinctId ?? '',
       userProperties: properties,
       flagValues: _mergeWithSwitchFlags(flags),
+      screenName: screen,
+      pageUrl: screen,
     );
     return evaluatePulseTargeting(rules, ctx);
   }
@@ -456,11 +499,100 @@ class SankofaPulse implements SankofaModule {
         },
       ),
     );
+    _presenting = true;
+    _shownThisSession.add(surveyId);
+    unawaited(_stampShown(surveyId));
     _emit(PulseEventPayload(
       event: PulseEvent.surveyShown,
       surveyId: surveyId,
     ));
+    // Clear the presenting guard once the dialog closes (submit or dismiss).
+    fut.whenComplete(() => _presenting = false);
     return fut;
+  }
+
+  // ── Auto-show pump ────────────────────────────────────────────────
+  //
+  // Presents the first eligible survey flagged `auto_show` that isn't inside
+  // its dismiss cooldown and hasn't shown this session, from the host's
+  // navigator. Mirrors iOS/Android. Triggered after each fetch, on app
+  // foreground, and when a navigator key is registered. Without this,
+  // dashboard surveys with auto_show=true never appear on Flutter.
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) maybeAutoShow();
+  }
+
+  /// Re-evaluate auto-show. Safe to call repeatedly — a no-op while a survey
+  /// is already on screen, auto-show is disabled, or nothing is eligible.
+  Future<void> maybeAutoShow() async {
+    if (!_registered || !_enabled || !autoShowEnabled || _presenting) return;
+    final ctx = _navigatorKey?.currentContext;
+    if (ctx == null) return; // host hasn't wired a navigator key yet
+    if (_cached.isEmpty) return;
+
+    final respondent = Sankofa.instance.identity?.distinctId ?? '';
+    final prefs = await SharedPreferences.getInstance();
+    final now = DateTime.now().millisecondsSinceEpoch;
+
+    PulseSurvey? candidate;
+    for (final s in _cached) {
+      if (_shownThisSession.contains(s.id)) continue;
+      final d = _display[s.id];
+      if (d != null && !d.autoShow) continue;
+      // Targeting.
+      final rules = _targetingRules[s.id] ?? const <PulseTargetingRule>[];
+      if (rules.isNotEmpty &&
+          !_evaluateLocally(
+            surveyId: s.id,
+            rules: rules,
+            properties: const {},
+            flags: const {},
+          ).eligible) {
+        continue;
+      }
+      // Dismiss cooldown.
+      final cooldownMs =
+          (d?.cooldownSeconds ?? _kDefaultCooldownSeconds) * 1000;
+      if (cooldownMs > 0) {
+        final last = prefs.getInt(_cooldownKey(respondent, s.id)) ?? 0;
+        if (last > 0 && now - last < cooldownMs) continue;
+      }
+      candidate = s;
+      break;
+    }
+    if (candidate == null) return;
+
+    final delayMs = _display[candidate.id]?.delayMs ?? 0;
+    final id = candidate.id;
+    Future<void> present() async {
+      if (_presenting) return;
+      final c2 = _navigatorKey?.currentContext;
+      if (c2 == null) return;
+      await show(c2, surveyId: id);
+    }
+
+    if (delayMs > 0) {
+      Future.delayed(Duration(milliseconds: delayMs), present);
+    } else {
+      await present();
+    }
+  }
+
+  static const int _kDefaultCooldownSeconds = 7 * 24 * 60 * 60;
+  String _cooldownKey(String respondent, String surveyId) =>
+      'sankofa.pulse.cooldown.$respondent.$surveyId';
+
+  Future<void> _stampShown(String surveyId) async {
+    try {
+      final respondent = Sankofa.instance.identity?.distinctId ?? '';
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setInt(
+        _cooldownKey(respondent, surveyId),
+        DateTime.now().millisecondsSinceEpoch,
+      );
+    } catch (_) {/* best-effort */}
   }
 
   // ── Partial save scheduler ──────────────────────────────────────────
@@ -567,40 +699,47 @@ class SankofaPulse implements SankofaModule {
 
   // ── Internals ─────────────────────────────────────────────────────
 
-  Future<void> _refreshSurveys() {
+  Future<void> _refreshSurveys({bool force = false}) {
     final c = _client;
     if (c == null) return Future.value();
     final pending = _refreshFuture;
-    if (pending != null) return pending;
+    // Coalesce concurrent refreshes — UNLESS forced (post-identify), where a
+    // stale in-flight request issued under the previous identity must not be
+    // returned in place of a fresh fetch.
+    if (pending != null && !force) return pending;
     final fut = () async {
       try {
-        // SDK-readable list endpoint — returns the lightweight
-        // summary + targeting rules per survey so the local
-        // eligibility evaluator has everything it needs without a
-        // per-survey bundle round-trip. Falls through to the legacy
-        // `/api/pulse/handshake` endpoint on older engines that
-        // 404 the new path; either response shape produces a
-        // populated _cached.
-        final summaries = await c.listSurveys();
-        if (summaries.isNotEmpty) {
-          _cached = summaries
-              .map((s) => PulseSurvey(
-                    id: s.id,
-                    kind: s.kind,
-                    name: s.name,
-                    description: s.description,
-                  ))
-              .toList(growable: false);
-          _targetingRules = {
-            for (final s in summaries) s.id: s.targetingRules,
-          };
-        } else {
-          final resp = await c.handshake();
-          _cached = resp.surveys;
-          _targetingRules = const {};
-        }
+        // SDK-readable list endpoint (GET /api/pulse/surveys) — returns the
+        // lightweight summary + targeting rules + display behaviour per
+        // survey, so the local eligibility evaluator + auto-show pump have
+        // everything they need without a per-survey bundle round-trip. An
+        // empty result simply means "no published surveys" (the dead
+        // /api/pulse/handshake fallback was removed — it 404s on the server).
+        final summaries = await c.listSurveys(forceRefresh: force);
+        _cached = summaries
+            .map((s) => PulseSurvey(
+                  id: s.id,
+                  kind: s.kind,
+                  name: s.name,
+                  description: s.description,
+                ))
+            .toList(growable: false);
+        _targetingRules = {
+          for (final s in summaries) s.id: s.targetingRules,
+        };
+        _display = {
+          for (final s in summaries)
+            s.id: _SurveyDisplay(
+              autoShow: s.autoShow,
+              cooldownSeconds: s.displayCooldownSeconds,
+              delayMs: s.displayDelayMs,
+            ),
+        };
         final q = _queue;
         if (q != null) await q.drain((p) => c.submit(p));
+        // A fresh list on a live screen should present an eligible auto_show
+        // survey immediately, not wait for the next resume.
+        maybeAutoShow();
       } catch (e) {
         if (kDebugMode) {
           debugPrint('[Sankofa] pulse refresh failed: $e');
@@ -663,4 +802,16 @@ class SankofaPulse implements SankofaModule {
       return null;
     }
   }
+}
+
+/// Per-survey display behaviour resolved from the SDK survey summary.
+class _SurveyDisplay {
+  final bool autoShow;
+  final int cooldownSeconds;
+  final int delayMs;
+  const _SurveyDisplay({
+    required this.autoShow,
+    required this.cooldownSeconds,
+    required this.delayMs,
+  });
 }

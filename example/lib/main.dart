@@ -10,11 +10,19 @@ void main() async {
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
 
+  // Shared navigator key — handed to both MaterialApp and SankofaPulse so
+  // auto_show surveys can present without a per-screen BuildContext.
+  static final GlobalKey<NavigatorState> navigatorKey =
+      GlobalKey<NavigatorState>();
+
   @override
   Widget build(BuildContext context) {
+    // Let Pulse present auto_show surveys from this navigator.
+    SankofaPulse.instance.setNavigatorKey(navigatorKey);
     return SankofaReplayBoundary(
       child: MaterialApp(
         title: 'Sankofa Demo',
+        navigatorKey: navigatorKey,
         navigatorObservers: [SankofaNavigatorObserver()],
         debugShowCheckedModeBanner: false,
         theme: ThemeData(
