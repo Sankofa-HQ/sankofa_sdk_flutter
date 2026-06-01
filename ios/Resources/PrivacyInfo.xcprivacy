@@ -1,0 +1,114 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  PrivacyInfo.xcprivacy — sankofa_flutter Flutter plugin Privacy Manifest
+
+  Apple has required a Privacy Manifest in every third-party iOS SDK
+  since May 2024. Missing or incorrect manifests are surfaced as
+  App Store Connect upload errors ITMS-91061 (missing manifest) and
+  ITMS-90683 (incorrect required-reason API entries).
+
+  This manifest covers the NATIVE code shipping in this pod:
+    1. Classes/SankofaFlutterPlugin.swift  — NSException + POSIX signal
+       crash reporter; persists captured events via UserDefaults so
+       they survive a hard process termination.
+    2. Classes/SankofaUpdaterBridge.swift  — Swift façade over the
+       vendored Rust updater (SankofaUpdaterFFI.xcframework). The Rust
+       updater itself ships its own PrivacyInfo.xcprivacy in each
+       xcframework slice; this manifest covers the Swift-side bridge.
+    3. Classes/SankofaFlutterAppDelegate.swift — drop-in FlutterAppDelegate
+       that injects --aot-shared-library-name= before engine init. No
+       data access of its own.
+
+  Required-Reason API audit (2026-05-31): exactly two categories trigger.
+  No SystemBootTime, DiskSpace, or ActiveKeyboards usage detected.
+-->
+<plist version="1.0">
+<dict>
+    <!-- ─── Required Reason APIs ────────────────────────────────────────── -->
+    <key>NSPrivacyAccessedAPITypes</key>
+    <array>
+        <!--
+          UserDefaults — SankofaFlutterPlugin.swift uses UserDefaults.standard
+          to persist the native crash event queue and POSIX signal dumps so
+          they survive process termination and reach the Sankofa Catch
+          ingest on the next launch. Per-app scope only; no App Group,
+          no managed configuration.
+        -->
+        <dict>
+            <key>NSPrivacyAccessedAPIType</key>
+            <string>NSPrivacyAccessedAPICategoryUserDefaults</string>
+            <key>NSPrivacyAccessedAPITypeReasons</key>
+            <array>
+                <!-- CA92.1: Read/write info accessible only to the app itself -->
+                <string>CA92.1</string>
+            </array>
+        </dict>
+        <!--
+          File timestamp — the vendored Rust updater (Sankofa Deploy) calls
+          std::fs::metadata() to verify the size and integrity of downloaded
+          patch files inside the app's own container. On iOS this lowers to
+          stat()/fstat() which Apple categorises as a file-timestamp access.
+          We never read or display the timestamp to the user.
+        -->
+        <dict>
+            <key>NSPrivacyAccessedAPIType</key>
+            <string>NSPrivacyAccessedAPICategoryFileTimestamp</string>
+            <key>NSPrivacyAccessedAPITypeReasons</key>
+            <array>
+                <!-- C617.1: Inside-app-container functionality (download verify) -->
+                <string>C617.1</string>
+            </array>
+        </dict>
+    </array>
+
+    <!-- ─── Data Collection ─────────────────────────────────────────────── -->
+    <!--
+      The pod's native code reports two data types off-device:
+        - DeviceID: an anonymous, per-app, app-scoped identifier used to
+          correlate crash events with patch-target installs. Not the IDFA,
+          not the IDFV directly, never shared across apps.
+        - CrashData: stack traces and signal context from NSException +
+          POSIX signal crashes, plus minimal device/OS strings.
+      Both are sent to api.sankofa.dev under the customer's API key.
+      Neither is linked to user identity; neither is used for tracking.
+    -->
+    <key>NSPrivacyCollectedDataTypes</key>
+    <array>
+        <dict>
+            <key>NSPrivacyCollectedDataType</key>
+            <string>NSPrivacyCollectedDataTypeDeviceID</string>
+            <key>NSPrivacyCollectedDataTypeLinked</key>
+            <false/>
+            <key>NSPrivacyCollectedDataTypeTracking</key>
+            <false/>
+            <key>NSPrivacyCollectedDataTypePurposes</key>
+            <array>
+                <string>NSPrivacyCollectedDataTypePurposeAppFunctionality</string>
+            </array>
+        </dict>
+        <dict>
+            <key>NSPrivacyCollectedDataType</key>
+            <string>NSPrivacyCollectedDataTypeCrashData</string>
+            <key>NSPrivacyCollectedDataTypeLinked</key>
+            <false/>
+            <key>NSPrivacyCollectedDataTypeTracking</key>
+            <false/>
+            <key>NSPrivacyCollectedDataTypePurposes</key>
+            <array>
+                <string>NSPrivacyCollectedDataTypePurposeAppFunctionality</string>
+            </array>
+        </dict>
+    </array>
+
+    <!-- ─── Tracking ────────────────────────────────────────────────────── -->
+    <!--
+      The pod does not engage in tracking (no IDFA, no cross-app linkage,
+      no ad-network identifiers). No Objective-C method swizzling.
+    -->
+    <key>NSPrivacyTracking</key>
+    <false/>
+    <key>NSPrivacyTrackingDomains</key>
+    <array/>
+</dict>
+</plist>

@@ -38,6 +38,16 @@ the standalone iOS SDK.
   s.dependency 'Flutter'
   s.platform = :ios, '13.0'
 
+  # Apple Privacy Manifest (mandatory since May 2024). Shipped as a resource
+  # bundle so it lands in <App>.app/Frameworks/sankofa_flutter_privacy.bundle/
+  # exactly like every other Flutter plugin in the ecosystem. Apple's App
+  # Store Connect validator will reject the upload with ITMS-91061 without it.
+  # The vendored xcframework slices each carry their own PrivacyInfo.xcprivacy
+  # for the Rust updater's data flows.
+  s.resource_bundles = {
+    'sankofa_flutter_privacy' => ['Resources/PrivacyInfo.xcprivacy']
+  }
+
   # Phase 6 (Sankofa Deploy OTA): vendor the Rust updater xcframework
   # built by flutter-deploy/sankofa-flutter-deploy/updater/build-ios.sh.
   # Xcode picks ios-arm64 for devices, ios-arm64_x86_64-simulator for
