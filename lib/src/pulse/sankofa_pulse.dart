@@ -58,9 +58,12 @@ class SankofaPulse with WidgetsBindingObserver implements SankofaModule {
   List<PulseSurvey> _cached = const [];
   Future<void>? _refreshFuture;
 
-  /// Host-registered navigator key, used as the presentation anchor for
-  /// auto-show (which has no BuildContext of its own). The host must pass the
-  /// SAME key to `MaterialApp(navigatorKey: ...)`.
+  /// Optional host-registered navigator key used as the presentation
+  /// anchor for auto-show. Not required — when null, auto-show discovers
+  /// the root navigator from the element tree (see
+  /// [_resolvePresentationContext]). Set it only to pin a specific
+  /// navigator in a nested-navigator app, passing the SAME key to
+  /// `MaterialApp(navigatorKey: ...)`.
   GlobalKey<NavigatorState>? _navigatorKey;
 
   /// Master switch for auto-show — mirrors the web `autoShow:false` opt-out.
@@ -84,11 +87,12 @@ class SankofaPulse with WidgetsBindingObserver implements SankofaModule {
   /// client.
   bool get isRegistered => _registered;
 
-  /// Register the host's navigator key so auto-show can present a survey
-  /// without a host-supplied BuildContext. Pass the SAME
+  /// Optional advanced override: pin auto-show to a specific navigator.
+  /// You do NOT need this — by default auto-show discovers the root
+  /// navigator from the element tree, so `init(enablePulse: true)` is
+  /// enough. Use it only in nested-navigator apps where the wrong
+  /// navigator would otherwise be picked; pass the SAME
   /// `GlobalKey<NavigatorState>` to your `MaterialApp(navigatorKey: key)`.
-  /// Without it, surveys flagged `auto_show` in the dashboard cannot
-  /// auto-present (the host must call [show] with a context instead).
   void setNavigatorKey(GlobalKey<NavigatorState> key) {
     _navigatorKey = key;
     // A key registered after the first fetch should still trigger a survey.
@@ -524,12 +528,44 @@ class SankofaPulse with WidgetsBindingObserver implements SankofaModule {
     if (state == AppLifecycleState.resumed) maybeAutoShow();
   }
 
+  /// Resolves a [BuildContext] to present an auto-show survey from.
+  ///
+  /// Prefers an explicitly-registered navigator key (see
+  /// [setNavigatorKey]) for hosts that need to pin a specific navigator
+  /// — e.g. a nested-navigator app. When none is set (the common case)
+  /// we discover the root [NavigatorState] by walking the live element
+  /// tree, so `init(enablePulse: true)` alone is enough — no host
+  /// wiring. `showDialog` uses `useRootNavigator: true`, so the
+  /// discovered root navigator presents above everything.
+  BuildContext? _resolvePresentationContext() =>
+      _navigatorKey?.currentContext ?? _findRootNavigator()?.context;
+
+  /// DFS the live element tree for the first (outermost) [NavigatorState].
+  /// Returns null before the first frame has built the app's navigator,
+  /// in which case auto-show simply retries on the next refresh/resume.
+  NavigatorState? _findRootNavigator() {
+    final root = WidgetsBinding.instance.rootElement;
+    if (root == null) return null;
+    NavigatorState? found;
+    void visit(Element element) {
+      if (found != null) return;
+      if (element is StatefulElement && element.state is NavigatorState) {
+        found = element.state as NavigatorState;
+        return;
+      }
+      element.visitChildren(visit);
+    }
+
+    root.visitChildren(visit);
+    return found;
+  }
+
   /// Re-evaluate auto-show. Safe to call repeatedly — a no-op while a survey
   /// is already on screen, auto-show is disabled, or nothing is eligible.
   Future<void> maybeAutoShow() async {
     if (!_registered || !_enabled || !autoShowEnabled || _presenting) return;
-    final ctx = _navigatorKey?.currentContext;
-    if (ctx == null) return; // host hasn't wired a navigator key yet
+    final ctx = _resolvePresentationContext();
+    if (ctx == null) return; // tree not built yet — retries on next refresh/resume
     if (_cached.isEmpty) return;
 
     final respondent = Sankofa.instance.identity?.distinctId ?? '';
@@ -568,7 +604,7 @@ class SankofaPulse with WidgetsBindingObserver implements SankofaModule {
     final id = candidate.id;
     Future<void> present() async {
       if (_presenting) return;
-      final c2 = _navigatorKey?.currentContext;
+      final c2 = _resolvePresentationContext();
       if (c2 == null) return;
       await show(c2, surveyId: id);
     }

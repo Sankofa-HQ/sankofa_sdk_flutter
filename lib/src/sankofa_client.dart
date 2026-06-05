@@ -3,7 +3,7 @@ import 'dart:convert';
 import 'dart:io' show Platform;
 import 'dart:math';
 import 'dart:ui' as ui;
-import 'package:flutter/foundation.dart' show kDebugMode;
+import 'package:flutter/foundation.dart' show kDebugMode, debugPrint;
 import 'package:http/http.dart' as http;
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -27,10 +27,14 @@ import 'core/module_registry.dart';
 import 'catch/catch_types.dart';
 import 'catch/native_bridge.dart';
 import 'catch/sankofa_catch.dart';
-import 'core/module_registry.dart' show ModuleIntegrationStatus;
 import 'core/integration_reporter.dart';
 import 'deploy/deploy_config.dart';
 import 'deploy/sankofa_deploy.dart';
+import 'switch/sankofa_switch.dart';
+import 'switch/flag_decision.dart';
+import 'config/sankofa_config.dart';
+import 'config/item_decision.dart';
+import 'pulse/sankofa_pulse.dart';
 import 'utils/logger.dart';
 import 'utils/uri_helper.dart';
 
@@ -192,6 +196,13 @@ class Sankofa {
 
   SankofaReplayConfig? _replayConfig;
   bool _isInitialized = false;
+  // Master switch for the analytics pipeline (event tracking, auto
+  // lifecycle/deep-link capture, presence heartbeat). Defaults true;
+  // flipped by `init(enableAnalytics:)`. When false, `track()` no-ops
+  // and the autonomous capture loops never start — but the core
+  // (identity, session, the unified handshake other modules depend on)
+  // still runs, so Catch/Switch/Config/Pulse/Deploy are unaffected.
+  bool _analyticsEnabled = true;
   // Re-entrancy guard: prevents two overlapping init() calls (rebuild, hot
   // restart, failed-then-retry) from both proceeding and double-registering
   // observers / leaking a second flush timer + presence heartbeat.
@@ -242,6 +253,21 @@ class Sankofa {
   /// `Sankofa.instance.init(enableCatch: true)` (default true).
   SankofaCatch? get errors => SankofaCatch.instance;
 
+  /// Sankofa Switch — feature flags. Auto-constructed by
+  /// `Sankofa.instance.init(enableFlags: true)` (default true); null if
+  /// flags were disabled and no `SankofaSwitch()` was made by hand.
+  SankofaSwitch? get flags => SankofaSwitch.instance;
+
+  /// Sankofa Config — remote config. Auto-constructed by
+  /// `Sankofa.instance.init(enableConfig: true)` (default true); null if
+  /// config was disabled and none was constructed by hand.
+  SankofaConfig? get config => SankofaConfig.instance;
+
+  /// Sankofa Pulse — in-app surveys. Always returns the singleton; check
+  /// [SankofaPulse.isRegistered] to know whether `init(enablePulse: true)`
+  /// (default true) has wired it to the core yet.
+  SankofaPulse get pulse => SankofaPulse.instance;
+
   /// Current identity — distinct_id + anonymous_id state. Modules that
   /// need to attach user identity to their own events (e.g. Catch) read
   /// from this rather than duplicating the identity machinery.
@@ -268,6 +294,16 @@ class Sankofa {
     bool enableSessionReplay = true,
     SankofaReplayMode replayMode = SankofaReplayMode.screenshot,
     int replayFps = 1,
+    // ── Analytics (event tracking) ─────────────────────────────────
+    //
+    // Master switch for the analytics product — event `track()`s, the
+    // auto lifecycle/deep-link capture, first-open, and the presence
+    // heartbeat. Defaults ON (analytics is the SDK's baseline product).
+    // Pass `enableAnalytics: false` to ship a build that runs ONLY the
+    // other products (Catch/Switch/Config/Pulse/Deploy) with zero
+    // analytics events leaving the device — the core handshake those
+    // modules ride on still runs.
+    bool enableAnalytics = true,
     // ── Catch (error tracking) ────────────────────────────────────
     //
     // Defaults match the "Crashlytics on by default" expectation —
@@ -300,6 +336,34 @@ class Sankofa {
     // patches). Hosts opt in via init.
     bool enableDeploy = false,
     SankofaDeployOptions deployOptions = const SankofaDeployOptions(),
+    // ── Switch (feature flags) ─────────────────────────────────────
+    //
+    // Auto-construct the [SankofaSwitch] singleton so flags resolve
+    // the moment the handshake lands — no host-side `SankofaSwitch()`
+    // boilerplate. Idempotent: a host that constructed one BEFORE
+    // init() (legacy path) keeps it. Defaults ON like Catch; the
+    // server handshake's `modules.switch.enabled` is authoritative, so
+    // an unsubscribed tier resolves to a no-op. Pass [flagDefaults] for
+    // values returned before the first handshake (and offline).
+    bool enableFlags = true,
+    Map<String, FlagDecision>? flagDefaults,
+    // ── Config (remote config) ─────────────────────────────────────
+    //
+    // Same shape as Switch — auto-constructs [SankofaConfig] so typed
+    // remote variables resolve from launch. Server-gated; [configDefaults]
+    // back synchronous reads before the handshake.
+    bool enableConfig = true,
+    Map<String, ItemDecision>? configDefaults,
+    // ── Pulse (in-app surveys) ─────────────────────────────────────
+    //
+    // Auto-registers [SankofaPulse] against the core we stand up below
+    // so the handshake's `modules.pulse` payload routes through and
+    // surveys flow with no `SankofaPulse.instance.register()`
+    // boilerplate. Auto-show needs no host wiring — Pulse discovers the
+    // root navigator from the element tree itself. (Nested-navigator
+    // apps that must pin a specific navigator can still call
+    // `SankofaPulse.instance.setNavigatorKey(...)`.)
+    bool enablePulse = true,
   }) async {
     // Re-entrancy guard — ignore overlapping init() calls.
     if (_initializing) return;
@@ -308,6 +372,7 @@ class Sankofa {
 
     _apiKey = apiKey;
     _endpoint = endpoint;
+    _analyticsEnabled = enableAnalytics;
     _logger = SankofaLogger(debug: debug);
     _identity = SankofaIdentity(logger: _logger);
 
@@ -348,6 +413,36 @@ class Sankofa {
       ));
     }
 
+    // ── Switch (feature flags) ──────────────────────────────────────
+    //
+    // Construct once if the host opted in and hasn't already made one.
+    // The constructor self-registers with the Traffic Cop and hydrates
+    // its disk cache off-frame, so flag reads work before the first
+    // handshake. `SankofaSwitch.instance` is the legacy-path dedupe.
+    if (enableFlags && SankofaSwitch.instance == null) {
+      SankofaSwitch(defaults: flagDefaults);
+    }
+
+    // ── Config (remote config) ──────────────────────────────────────
+    //
+    // Same shape as Switch — `SankofaConfig.instance` dedupes a host
+    // that constructed one before init() (legacy path).
+    if (enableConfig && SankofaConfig.instance == null) {
+      SankofaConfig(defaults: configDefaults);
+    }
+
+    // ── Pulse (in-app surveys) ──────────────────────────────────────
+    //
+    // Register against the core we just stood up. `register()` reads
+    // the apiKey/endpoint set above, self-registers with the Traffic
+    // Cop, and kicks an off-frame survey refresh — we don't await it so
+    // a slow network never blocks app boot. Idempotent via
+    // `isRegistered`. Auto-show resolves its own navigator from the
+    // element tree, so no key wiring is needed here.
+    if (enablePulse && !SankofaPulse.instance.isRegistered) {
+      unawaited(SankofaPulse.instance.register());
+    }
+
     // ── Deploy (OTA updates) ────────────────────────────────────────
     //
     // Auto-construct the [SankofaDeploy] singleton if the host opted
@@ -357,8 +452,9 @@ class Sankofa {
     // native side doesn't deadlock the rest of the SDK; failures land
     // in the platform logger and surface on the first
     // `Sankofa.deploy.checkForUpdate()` call.
+    Future<void>? deployReady;
     if (enableDeploy && SankofaDeploy.instance == null) {
-      unawaited(SankofaDeploy.initInternal(
+      deployReady = SankofaDeploy.initInternal(
         apiKey: apiKey,
         endpoint: endpoint,
         options: deployOptions,
@@ -366,47 +462,12 @@ class Sankofa {
         // Post-init integration self-audit. Warns in debug mode when
         // the host's manifest, MainActivity, permissions, or meta-data
         // are missing pieces that would make OTA silently fail at
-        // runtime. Result is cached for the reverse handshake (server-
-        // side dashboard "SDK integration incomplete" badge, future).
+        // runtime. Cached for the SDK Health reverse handshake below
+        // (and exposed via [lastDeployIntegrationStatus]). The report
+        // itself is NOT fired here — see the Deploy-independent block
+        // after this one.
         final status = await deploy.checkIntegration();
         _lastDeployIntegrationStatus = status;
-        // Reverse handshake — fire-and-forget POST so the dashboard's
-        // SDK Health page sees this app's integration state. Collect
-        // every registered module's audit and ship them as one batch.
-        // Errors stay non-fatal; we wrap in unawaited so a slow network
-        // never blocks the rest of init.
-        unawaited(() async {
-          final batch = <ModuleIntegrationStatus>[status];
-          // Pulse first: register() must run before its audit is
-          // useful. The other modules audit themselves via the Module
-          // Registry — we walk it to pick up every constructed module
-          // (Catch / Switch / Config / Pulse) without coupling this
-          // file to each module's class.
-          for (final mod in SankofaModuleRegistry.instance.installed()) {
-            // Deploy was already audited above; skip to avoid
-            // double-counting.
-            if (mod.name == SankofaModuleName.deploy) continue;
-            try {
-              final dynamic dynMod = mod;
-              final result = dynMod.checkIntegration();
-              if (result is Future<ModuleIntegrationStatus>) {
-                batch.add(await result);
-              } else if (result is ModuleIntegrationStatus) {
-                batch.add(result);
-              }
-            } catch (_) {
-              // Per-module audit errors stay quiet; the next launch
-              // re-runs.
-            }
-          }
-          await reportIntegrationStatuses(
-            apiKey: apiKey,
-            serverBaseUri: UriHelper.resolveServerBaseUri(endpoint),
-            statuses: batch,
-            appVersion: appVersion,
-            debug: kDebugMode,
-          );
-        }());
         if (!status.isFull && kDebugMode) {
           // ignore: avoid_print
           print('');
@@ -433,8 +494,33 @@ class Sankofa {
           // ignore: avoid_print
           print('[Sankofa Deploy] integration audit threw: $err');
         }
-      }));
+      });
     }
+
+    // ── SDK Health (reverse handshake) — INDEPENDENT of every product ─
+    //
+    // Fires for EVERY init regardless of which products are enabled, so
+    // an analytics-only or Catch-only app still shows up on the
+    // dashboard's SDK Health page. (This used to live INSIDE the Deploy
+    // block, so apps without `enableDeploy` reported nothing — even
+    // while their events and errors flowed through their own pipelines.)
+    // It POSTs to /api/v1/handshake/integrations and depends on nothing
+    // but the apiKey/endpoint set above. Fire-and-forget; never blocks
+    // boot. When Deploy is enabled we wait for its async audit first so
+    // its status lands in the same batch; otherwise we report straight
+    // away off the synchronously-registered modules.
+    unawaited(() async {
+      if (deployReady != null) {
+        try {
+          await deployReady;
+        } catch (_) {/* already logged above; report the rest anyway */}
+      }
+      await _reportSdkHealth(
+        apiKey: apiKey,
+        endpoint: endpoint,
+        appVersion: appVersion,
+      );
+    }());
 
     final v1BaseUri = UriHelper.resolveV1BaseUri(endpoint);
     final trackUri = UriHelper.resolveTrackUri(endpoint);
@@ -553,16 +639,19 @@ class Sankofa {
     // Live-presence heartbeat — independent of analytics flush so it
     // ticks at its own cadence (15s) while the app is foregrounded.
     // Cheap one-tiny-POST-per-tick; paused on
-    // AppLifecycleState.paused / hidden.
-    _presence = PresenceHeartbeat(
-      endpoint: endpoint,
-      apiKey: apiKey,
-      payloadProvider: () => (
-        screen: hasTaggedScreen ? _currentScreen : null,
-        distinctId: _identity.distinctId,
-        sessionId: _sessionManager.sessionId,
-      ),
-    )..start();
+    // AppLifecycleState.paused / hidden. Part of the analytics product,
+    // so it stays dark when `enableAnalytics: false`.
+    if (_analyticsEnabled) {
+      _presence = PresenceHeartbeat(
+        endpoint: endpoint,
+        apiKey: apiKey,
+        payloadProvider: () => (
+          screen: hasTaggedScreen ? _currentScreen : null,
+          distinctId: _identity.distinctId,
+          sessionId: _sessionManager.sessionId,
+        ),
+      )..start();
+    }
 
     // Heatmap snapshotter — reuses the replay recorder's root
     // RepaintBoundary key so the host only needs one wrap point. Off
@@ -616,6 +705,56 @@ class Sankofa {
     _logger.log('📍 Screen changed to: $screenName');
   }
 
+  /// SDK Health reverse handshake — audits every installed module and
+  /// POSTs the batch to `/api/v1/handshake/integrations` so the
+  /// dashboard's SDK Health page reflects this app. Independent of
+  /// which products are enabled: it walks the Module Registry, so
+  /// whatever was constructed (Catch / Switch / Config / Pulse /
+  /// Deploy) gets reported. Fire-and-forget — every error is swallowed
+  /// (the next launch re-runs the audit).
+  Future<void> _reportSdkHealth({
+    required String apiKey,
+    required String endpoint,
+    String? appVersion,
+  }) async {
+    try {
+      final batch = <ModuleIntegrationStatus>[];
+      // Deploy audits asynchronously over a platform channel; prefer its
+      // cached result so we don't fire a second channel call here. Every
+      // other module's checkIntegration() is cheap and synchronous-ish.
+      final cachedDeploy = _lastDeployIntegrationStatus;
+      for (final mod in SankofaModuleRegistry.instance.installed()) {
+        if (mod.name == SankofaModuleName.deploy && cachedDeploy != null) {
+          continue; // added below from cache
+        }
+        try {
+          final dynamic dynMod = mod;
+          final result = dynMod.checkIntegration();
+          if (result is Future<ModuleIntegrationStatus>) {
+            batch.add(await result);
+          } else if (result is ModuleIntegrationStatus) {
+            batch.add(result);
+          }
+        } catch (_) {
+          // Per-module audit errors stay quiet; the next launch re-runs.
+        }
+      }
+      if (cachedDeploy != null) batch.add(cachedDeploy);
+      if (batch.isEmpty) return; // nothing installed — nothing to report
+      await reportIntegrationStatuses(
+        apiKey: apiKey,
+        serverBaseUri: UriHelper.resolveServerBaseUri(endpoint),
+        statuses: batch,
+        appVersion: appVersion,
+        debug: kDebugMode,
+      );
+    } catch (e) {
+      if (kDebugMode) {
+        debugPrint('[Sankofa] SDK Health report failed: $e');
+      }
+    }
+  }
+
   /// Tracks a custom event with optional [properties].
   Future<void> track(
     String eventName, [
@@ -625,6 +764,11 @@ class Sankofa {
       _logger.log('❌ Sankofa not initialized');
       return;
     }
+
+    // Analytics product disabled — drop every event (manual + auto
+    // lifecycle/deep-link/first-open) so nothing reaches the queue.
+    // The other products run their own pipelines and are unaffected.
+    if (!_analyticsEnabled) return;
 
     // Refresh only if not initialized yet (for first internal events) or normally
     if (_isInitialized) await _sessionManager.refresh();

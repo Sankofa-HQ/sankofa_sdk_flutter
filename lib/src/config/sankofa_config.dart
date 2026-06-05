@@ -24,6 +24,12 @@ import 'item_decision.dart';
 /// final max = cfg.get<int>('max_upload_mb', 25);
 /// ```
 class SankofaConfig implements SankofaModule {
+  /// Last-constructed instance of [SankofaConfig]. Lets the host reach
+  /// remote config via `Sankofa.instance.config` without threading the
+  /// instance through their own DI. Null until the host (or
+  /// `init(enableConfig: true)`) constructs one.
+  static SankofaConfig? instance;
+
   static const String _storageKey = 'sankofa:config:state';
   static const Duration _staleMax = Duration(days: 7);
 
@@ -46,6 +52,7 @@ class SankofaConfig implements SankofaModule {
   SankofaConfig({Map<String, ItemDecision>? defaults})
       : _defaults = defaults ?? const {} {
     SankofaModuleRegistry.instance.register(this);
+    SankofaConfig.instance = this;
     unawaited(_hydrate());
   }
 
