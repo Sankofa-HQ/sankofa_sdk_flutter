@@ -30,7 +30,7 @@ dependencies:
 ```
 
 ### 2. Initialize
-One line — Catch auto-installs with the SDK. Both Dart errors AND iOS/Android native crashes flow through `Sankofa.captureException` etc.
+**One call wires every product.** Analytics, Catch, Switch, Config and Pulse all come up from a single `init()` — no per-product `new SankofaX()` boilerplate, no `register()` step. Each product is gated server-side via the handshake, so a flag you don't subscribe to is simply a no-op. Both Dart errors AND iOS/Android native crashes flow through `Sankofa.captureException`.
 
 ```dart
 import 'package:sankofa_flutter/sankofa_flutter.dart';
@@ -42,11 +42,20 @@ void main() async {
     apiKey: 'YOUR_PROJECT_API_KEY',
     endpoint: 'https://api.sankofa.dev',
     debug: true,
-    // Catch (defaults shown — enableCatch is true by default).
-    enableCatch: true,
+
+    // ── Product switches (all default true except Deploy) ──
+    enableAnalytics: true, // events, screens, lifecycle, presence
+    enableCatch: true,     // errors + native crashes
+    enableFlags: true,     // Switch — feature flags
+    enableConfig: true,    // remote config
+    enablePulse: true,     // in-app surveys (auto-shows, no extra wiring)
+
+    // ── Optional per-product config ──
     catchEnvironment: 'production',
     release: 'myapp@1.4.0',
-    // Optional Sentry-style hook to scrub PII / drop noise.
+    flagDefaults: {'new_checkout': FlagDecision(value: false, reason: 'default')},
+    configDefaults: {'max_upload_mb': ItemDecision(value: 25, version: 1, reason: 'default')},
+    // Sentry-style hook to scrub PII / drop noise.
     beforeSend: (event) {
       if (event.message?.contains('setState called after dispose') ?? false) return null;
       return event;
@@ -56,6 +65,10 @@ void main() async {
   runApp(const MyApp());
 }
 ```
+
+After `init()`, reach any product through the client: `Sankofa.instance.flags`, `.config`, `.pulse`, `.errors`. The legacy `SankofaSwitch()` / `SankofaConfig()` / `SankofaPulse.instance.register()` constructors still work (and win if you call them before `init`), but they're no longer required.
+
+> **Turning a product off:** pass `enableFlags: false` (etc.) to skip constructing it entirely. `enableAnalytics: false` ships a build that sends **zero** analytics events while keeping Catch/Switch/Config/Pulse live.
 
 ---
 
@@ -129,8 +142,10 @@ SankofaMask(
 
 ### Switch — feature flags
 
+Auto-constructed by `init(enableFlags: true)`. Read from anywhere via `Sankofa.instance.flags`:
+
 ```dart
-final flags = SankofaSwitch({'new_checkout': false});
+final flags = Sankofa.instance.flags!; // pass flagDefaults to init() for offline-first values
 
 if (flags.getFlag('new_checkout')) showNewCheckout();
 final variant = flags.getVariant('checkout_redesign', defaultValue: 'control');
@@ -138,17 +153,25 @@ final variant = flags.getVariant('checkout_redesign', defaultValue: 'control');
 
 ### Config — remote config
 
-```dart
-final config = SankofaConfig({'max_uploads_per_day': 25});
+Auto-constructed by `init(enableConfig: true)`. Read via `Sankofa.instance.config`:
 
-final maxUploads = config.get<int>('max_uploads_per_day', defaultValue: 25);
+```dart
+final config = Sankofa.instance.config!; // pass configDefaults to init() for offline-first values
+
+final maxUploads = config.get<int>('max_uploads_per_day', 25);
 ```
 
 ### Pulse — surveys
 
+Auto-registered by `init(enablePulse: true)` — no `register()` call needed. Surveys flagged **auto-show** in the dashboard appear on their own; Pulse discovers your app's navigator automatically, so there's **no navigator key to wire up**. Present one manually with:
+
 ```dart
-await SankofaPulse.instance.register();
-await SankofaPulse.instance.show(context, surveyId: 'nps-2024');
+await Sankofa.instance.pulse.show(context, surveyId: 'nps-2024');
+
+// React to lifecycle events
+Sankofa.instance.pulse.on(PulseEvent.surveyCompleted, (e) {
+  print('Survey ${e.surveyId} completed');
+});
 ```
 
 ---

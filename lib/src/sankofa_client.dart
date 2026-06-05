@@ -719,6 +719,15 @@ class Sankofa {
   }) async {
     try {
       final batch = <ModuleIntegrationStatus>[];
+      // Analytics is the SDK's core — it never registers as a
+      // SankofaModule (it has no Traffic Cop handshake of its own), so
+      // the registry walk below can't see it. Synthesize its status
+      // explicitly when enabled: if init() got this far the event
+      // pipeline is up, so it's `full`. Without this, SDK Health shows
+      // every product EXCEPT analytics even though events are flowing.
+      if (_analyticsEnabled) {
+        batch.add(ModuleIntegrationStatus.full(SankofaModuleName.analytics));
+      }
       // Deploy audits asynchronously over a platform channel; prefer its
       // cached result so we don't fire a second channel call here. Every
       // other module's checkIntegration() is cheap and synchronous-ish.
