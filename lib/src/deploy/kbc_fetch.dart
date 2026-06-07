@@ -157,12 +157,28 @@ Future<KbcFetchResult> fetchAndApplyKbcPatch({
       headers: {'x-api-key': apiKey},
     ).timeout(timeout);
   } catch (err) {
-    throw KbcFetchException(
-      'check request failed: $err',
-      cause: err,
+    // Network-layer failure (DNS, TCP refused, timeout, TLS). Return
+    // a structured "no update" instead of throwing — matches RN SDK's
+    // offline tolerance (sankofa_sdk_react_native/SankofaDeploy.ts).
+    // Hosts that want to surface this can read result.reason; hosts
+    // that just want UX should treat it as "Up to date / offline".
+    return KbcFetchResult(
+      hasUpdate: false,
+      reason: 'network_error:check:$err',
+    );
+  }
+  if (checkResp.statusCode >= 500) {
+    // Server-side failure — return structured so the host doesn't
+    // crash on every transient 5xx. Same rationale as network errors.
+    return KbcFetchResult(
+      hasUpdate: false,
+      reason: 'server_error:check:HTTP ${checkResp.statusCode}',
     );
   }
   if (checkResp.statusCode != 200) {
+    // 4xx — configuration error (bad apiKey, unknown project, etc.).
+    // Keep as exception: these indicate integration bugs the customer
+    // needs to fix, not transient failures to ignore.
     throw KbcFetchException(
       'check returned HTTP ${checkResp.statusCode}: ${checkResp.body}',
       statusCode: checkResp.statusCode,
@@ -220,12 +236,26 @@ Future<KbcFetchResult> fetchAndApplyKbcPatch({
   try {
     bundleResp = await http.get(Uri.parse(downloadUrl)).timeout(timeout);
   } catch (err) {
-    throw KbcFetchException(
-      'envelope download failed: $err',
-      cause: err,
+    // Network-layer failure pulling the envelope from B2/S3. Return
+    // structured (RN parity) — the device can retry next check.
+    return KbcFetchResult(
+      hasUpdate: false,
+      reason: 'network_error:download:$err',
+      releaseId: releaseId,
+      label: label,
+    );
+  }
+  if (bundleResp.statusCode >= 500 || bundleResp.statusCode == 403) {
+    // 5xx from CDN, or 403 (presigned URL expired) — transient, retry next check.
+    return KbcFetchResult(
+      hasUpdate: false,
+      reason: 'storage_error:download:HTTP ${bundleResp.statusCode}',
+      releaseId: releaseId,
+      label: label,
     );
   }
   if (bundleResp.statusCode != 200) {
+    // 4xx other than 403 — bad URL or malformed presign. Programmer error.
     throw KbcFetchException(
       'envelope download returned HTTP ${bundleResp.statusCode}',
       statusCode: bundleResp.statusCode,
