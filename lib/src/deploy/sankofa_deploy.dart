@@ -529,23 +529,40 @@ class SankofaDeploy implements SankofaModule {
     return result;
   }
 
-  // ── Rollback safety (Shorebird-pattern) ─────────────────────────────
+  // ── Rollback safety (RN-style time-window) ──────────────────────────
   //
-  // Every cold-boot apply increments _kbcBootCounterKey by 1; the host
-  // calls [notifyKbcPatchReady] from its first-frame callback to reset
-  // it. If the count crosses [kbcRollbackThreshold] without notify
-  // landing, the patch is auto-disabled (file moved to
-  // patch.skdp.disabled-<timestamp>) and the next boot falls back to
-  // baseline. Without this, one bad patch crash-loops every device
-  // forever — the SDK's job is to never let that happen.
+  // Auto-rollback uses the **same time-window heuristic** the React
+  // Native SDK ships in production: at boot, if the previous boot did
+  // NOT confirm healthy AND was within [kKbcCrashWindow] ago, treat
+  // that previous boot as a crash. Two such consecutive crashes trip
+  // the rollback (file moves to disabled/, last_good restores to
+  // active). Healthy long sessions never count — a user who relaunches
+  // the app three times across the day is not a crash storm.
   //
-  // The threshold is intentionally low (3) — a real boot crash usually
-  // surfaces in <1s, well before any reasonable splash screen would
-  // finish, so 3 crashes feels like "definitely broken" without being
-  // chatty enough to trigger on a single transient native-init hiccup.
+  // Migration: the previous boot-count model used `_kbcBootCounterKey`
+  // alone (every boot incremented, regardless of duration). That key
+  // is read once on first run after upgrade, then deleted — the new
+  // model is its own state machine.
+  //
+  // RN parity: CRASH_THRESHOLD=2, CRASH_WINDOW_MS=30_000,
+  // HEALTH_CONFIRM_MS=10_000 (already in [kKbcAutoConfirmDelay]).
 
+  /// Legacy boot-count key (pre-time-window). Read at most once to
+  /// detect upgrade, then cleared. Do not use for new chain-safety.
   static const String _kbcBootCounterKey = 'sankofa.deploy.kbc.boot_counter';
+  static const String _kbcLastBootTimeMsKey = 'sankofa.deploy.kbc.last_boot_ms';
+  static const String _kbcBootConfirmedKey = 'sankofa.deploy.kbc.boot_confirmed';
+  static const String _kbcCrashCountKey = 'sankofa.deploy.kbc.crash_count';
   static const String _kbcLastDisabledKey = 'sankofa.deploy.kbc.last_disabled_label';
+
+  /// Threshold of consecutive quick-boot crashes that triggers rollback.
+  /// Mirrors RN's `CRASH_THRESHOLD`.
+  static const int kKbcCrashThreshold = 2;
+
+  /// A boot is considered a "crash" only if the previous boot didn't
+  /// confirm healthy and was within this window of the current boot.
+  /// Mirrors RN's `CRASH_WINDOW_MS`.
+  static const Duration kKbcCrashWindow = Duration(seconds: 30);
 
   /// Comma-separated set of patch labels that have triggered auto-
   /// rollback at any point in this app's life. The SDK refuses to
@@ -579,10 +596,10 @@ class SankofaDeploy implements SankofaModule {
     return Directory('${docsDir.path}/sankofa-deploy/patches/$slot');
   }
 
-  /// Max consecutive boots that may apply the staged patch without
-  /// [notifyKbcPatchReady] being called before we disable it. Hosts can
-  /// override per-app by reading the staged-file path off
-  /// [SankofaDeployOptions] (not yet plumbed — file an issue if needed).
+  /// Legacy boot-count threshold (pre-time-window). Kept as a public
+  /// const for API stability — the new model uses [kKbcCrashThreshold]
+  /// + [kKbcCrashWindow].
+  @Deprecated('Use kKbcCrashThreshold + kKbcCrashWindow (time-window model).')
   static const int kbcRollbackThreshold = 3;
 
   /// Look for a KBC patch that a previous session staged on disk and
@@ -626,14 +643,37 @@ class SankofaDeploy implements SankofaModule {
     final patchPath = await _kbcSlotPath(_kbcSlotActive);
     if (!File(patchPath).existsSync()) return null;
 
-    // Rollback gate: if the previous N boots failed to reach
-    // notifyKbcPatchReady, the staged patch is presumed bad. Move it
-    // to the disabled archive, then RESTORE last_good if one exists —
-    // dropping all the way back to baseline loses every successful
-    // patch in the chain and is way more disruptive than necessary.
+    // Rollback gate (time-window model — RN parity). Counts a boot as
+    // a "crash" only if the previous boot didn't confirm healthy AND
+    // was within kKbcCrashWindow. Two such consecutive crashes trip
+    // the rollback.
     final prefs = await SharedPreferences.getInstance();
-    final bootCount = (prefs.getInt(_kbcBootCounterKey) ?? 0) + 1;
-    if (bootCount > kbcRollbackThreshold) {
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+
+    // Migrate from the legacy boot-count model: if the old counter
+    // exists, ignore it (no decision based on it) and just delete.
+    if (prefs.containsKey(_kbcBootCounterKey)) {
+      await prefs.remove(_kbcBootCounterKey);
+    }
+
+    final lastBootMs = prefs.getInt(_kbcLastBootTimeMsKey);
+    final lastBootConfirmed = prefs.getBool(_kbcBootConfirmedKey) ?? false;
+    int crashCount = prefs.getInt(_kbcCrashCountKey) ?? 0;
+
+    final previousBootCrashed = !lastBootConfirmed &&
+        lastBootMs != null &&
+        (nowMs - lastBootMs) < kKbcCrashWindow.inMilliseconds;
+
+    if (previousBootCrashed) {
+      crashCount += 1;
+      await prefs.setInt(_kbcCrashCountKey, crashCount);
+    } else if (lastBootConfirmed) {
+      // Clean reset on any healthy prior boot.
+      crashCount = 0;
+      await prefs.setInt(_kbcCrashCountKey, 0);
+    }
+
+    if (crashCount >= kKbcCrashThreshold) {
       // Best-effort: parse the bad envelope's label before moving it
       // aside, so we can record it in the banned set + tell the
       // dashboard which release failed. Parse-only — no apply.
@@ -665,14 +705,18 @@ class SankofaDeploy implements SankofaModule {
         if (kDebugMode) {
           debugPrint(
             '[Sankofa.deploy] AUTO-ROLLBACK: staged patch "$rolledBackLabel" '
-            'crashed $bootCount consecutive boots; moved to $disabledPath.',
+            'crashed $crashCount consecutive boots inside ${kKbcCrashWindow.inSeconds}s '
+            '— moved to $disabledPath.',
           );
         }
       } catch (_) {
         // Rename failed — disk full or permission. Still bail out of
         // applying; don't keep crash-looping.
       }
-      await prefs.remove(_kbcBootCounterKey);
+      // Reset chain-safety state — we just rolled back.
+      await prefs.remove(_kbcCrashCountKey);
+      await prefs.setBool(_kbcBootConfirmedKey, false);
+      await prefs.setInt(_kbcLastBootTimeMsKey, nowMs);
 
       // Restore last_good → active if we have one. Customer doesn't
       // drop all the way back to baseline — falls back to the most
@@ -699,7 +743,11 @@ class SankofaDeploy implements SankofaModule {
       ));
       return null;
     }
-    await prefs.setInt(_kbcBootCounterKey, bootCount);
+
+    // Record this boot. boot_confirmed flips to true only when the host
+    // calls notifyKbcPatchReady() or the 10s auto-confirm timer fires.
+    await prefs.setInt(_kbcLastBootTimeMsKey, nowMs);
+    await prefs.setBool(_kbcBootConfirmedKey, false);
 
     try {
       final result = await kbc_loader.applyKbcEnvelopeFromFile(
@@ -760,7 +808,8 @@ class SankofaDeploy implements SankofaModule {
   /// Reset the rollback boot-counter — call this from the host's
   /// first-frame callback (or any "the app survived initial render"
   /// signal). Without this call, a bad patch will crash-loop the app
-  /// until [kbcRollbackThreshold] boots, then auto-disable itself.
+  /// until [kKbcCrashThreshold] quick-crash boots (each within
+  /// [kKbcCrashWindow] of the previous), then auto-disable itself.
   ///
   /// Typical wiring:
   ///
@@ -784,19 +833,24 @@ class SankofaDeploy implements SankofaModule {
     _autoConfirmTimer?.cancel();
     _autoConfirmTimer = null;
     final prefs = await SharedPreferences.getInstance();
-    final count = prefs.getInt(_kbcBootCounterKey) ?? 0;
+    final priorCrashCount = prefs.getInt(_kbcCrashCountKey) ?? 0;
     await _confirmHealthInternal(prefs: prefs);
-    return count;
+    return priorCrashCount;
   }
 
   /// Internal "this patch is healthy" routine — shared by
   /// [notifyKbcPatchReady] (explicit, host-driven) and the auto-confirm
   /// safety-net timer (implicit, fired 10s after a successful apply).
-  /// Idempotent: resets the boot counter and best-effort promotes the
-  /// active patch to last_good.
+  /// Idempotent: marks the boot as confirmed, resets the crash counter,
+  /// and best-effort promotes the active patch to last_good.
   Future<void> _confirmHealthInternal({SharedPreferences? prefs}) async {
     final p = prefs ?? await SharedPreferences.getInstance();
-    await p.remove(_kbcBootCounterKey);
+    await p.setBool(_kbcBootConfirmedKey, true);
+    await p.setInt(_kbcCrashCountKey, 0);
+    // Clean legacy key if a migration didn't catch it earlier.
+    if (p.containsKey(_kbcBootCounterKey)) {
+      await p.remove(_kbcBootCounterKey);
+    }
     try {
       await _promoteActiveToLastGood();
     } catch (e) {

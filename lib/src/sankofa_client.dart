@@ -37,6 +37,7 @@ import 'config/item_decision.dart';
 import 'pulse/sankofa_pulse.dart';
 import 'utils/logger.dart';
 import 'utils/uri_helper.dart';
+import 'sankofa_bootstrap.dart';
 
 /// The main entry point for the Sankofa Analytics SDK.
 ///
@@ -45,6 +46,32 @@ class Sankofa {
   /// The singleton instance of the Sankofa client.
   static final Sankofa instance = Sankofa._internal();
   Sankofa._internal();
+
+  /// One-call startup: read sankofa.yaml from the asset bundle, init
+  /// the SDK with the parsed apiKey + endpoint, apply any KBC patch
+  /// staged on disk, and schedule `notifyKbcPatchReady` after the
+  /// first frame paints.
+  ///
+  /// Replaces ~15 lines of boilerplate in `main()` with one call. See
+  /// [SankofaBootstrap.run] for the full contract.
+  ///
+  /// ```dart
+  /// import 'package:dynamic_modules/dynamic_modules.dart';
+  /// import 'package:sankofa_flutter/sankofa_flutter.dart';
+  ///
+  /// void main() async {
+  ///   WidgetsFlutterBinding.ensureInitialized();
+  ///   final boot = await Sankofa.bootstrap(
+  ///     options: SankofaBootstrapOptions(loader: loadModuleFromBytes),
+  ///   );
+  ///   runApp(MyApp(bootResult: boot));
+  /// }
+  /// ```
+  static Future<SankofaBootstrapResult> bootstrap({
+    SankofaBootstrapOptions options = const SankofaBootstrapOptions(),
+  }) {
+    return SankofaBootstrap.run(options: options);
+  }
 
   // ───────────────────────────────────────────────────────────────────
   // Static error-tracking helpers — Crashlytics + Sentry style

@@ -6,6 +6,9 @@
 library sankofa_flutter;
 
 export 'src/sankofa_client.dart';
+// One-call startup (reads sankofa.yaml, inits, applies any staged patch).
+export 'src/sankofa_bootstrap.dart'
+    show SankofaBootstrap, SankofaBootstrapOptions, SankofaBootstrapResult;
 export 'src/replay/sankofa_replay.dart'
     show
         SankofaReplay,
