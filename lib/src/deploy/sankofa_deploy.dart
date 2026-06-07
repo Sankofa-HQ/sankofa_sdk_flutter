@@ -1,3 +1,4 @@
+import 'dart:async' show Timer;
 import 'dart:convert' show jsonEncode;
 import 'dart:io' show Directory, File;
 
@@ -171,6 +172,22 @@ class SankofaDeploy implements SankofaModule {
   /// access can read `SankofaDeploy.instance`.
   static SankofaDeploy? _instance;
   static SankofaDeploy? get instance => _instance;
+
+  // ── Chain-safety auto-confirm timer (RN parity) ───────────────────
+  //
+  // Mirrors the React-Native SDK's `HEALTH_CONFIRM_MS = 10_000` safety
+  // net (see `sankofa_sdk_react_native/src/deploy/SankofaDeploy.ts`).
+  // After a patch successfully applies on cold boot, we start a 10s
+  // timer that auto-acks the patch if the host never calls
+  // [notifyKbcPatchReady] explicitly. This removes the "customer
+  // forgot to wire notifyKbcPatchReady" footgun — a clean app that
+  // renders fine for 10s is treated as proof the patch is healthy.
+  //
+  // [notifyKbcPatchReady] cancels this timer and confirms manually,
+  // so apps that DO wire it still get exact "first-frame ready"
+  // semantics.
+  Timer? _autoConfirmTimer;
+  static const Duration kKbcAutoConfirmDelay = Duration(seconds: 10);
 
   final SankofaDeployOptions options;
   bool _ready = false;
@@ -694,6 +711,11 @@ class SankofaDeploy implements SankofaModule {
         eventType: 'kbc_boot_apply_success',
         bundleLabel: result.metadata['label']?.toString(),
       ));
+      // Arm the 10s auto-confirm safety net (RN parity). If the host
+      // never calls notifyKbcPatchReady, we'll auto-ack so a clean
+      // 10-second-old app session is treated as proof the patch is
+      // healthy. notifyKbcPatchReady cancels this and confirms exactly.
+      _armAutoConfirmTimer();
       return result;
     } on KbcApplyException catch (err) {
       if (kDebugMode) {
@@ -756,12 +778,25 @@ class SankofaDeploy implements SankofaModule {
   /// subsequent auto-rollback can restore from this slot instead of
   /// dropping the user all the way back to baseline.
   Future<int> notifyKbcPatchReady() async {
+    // Cancel the auto-confirm safety-net timer if it's armed — the
+    // host has explicitly told us the patch is healthy, so we don't
+    // need the 10s fallback to do it for us.
+    _autoConfirmTimer?.cancel();
+    _autoConfirmTimer = null;
     final prefs = await SharedPreferences.getInstance();
     final count = prefs.getInt(_kbcBootCounterKey) ?? 0;
-    await prefs.remove(_kbcBootCounterKey);
-    // Promote the now-trusted active patch to last_good. Best-effort —
-    // if disk IO fails the next rollback just falls to baseline, which
-    // is the legacy behavior.
+    await _confirmHealthInternal(prefs: prefs);
+    return count;
+  }
+
+  /// Internal "this patch is healthy" routine — shared by
+  /// [notifyKbcPatchReady] (explicit, host-driven) and the auto-confirm
+  /// safety-net timer (implicit, fired 10s after a successful apply).
+  /// Idempotent: resets the boot counter and best-effort promotes the
+  /// active patch to last_good.
+  Future<void> _confirmHealthInternal({SharedPreferences? prefs}) async {
+    final p = prefs ?? await SharedPreferences.getInstance();
+    await p.remove(_kbcBootCounterKey);
     try {
       await _promoteActiveToLastGood();
     } catch (e) {
@@ -769,7 +804,34 @@ class SankofaDeploy implements SankofaModule {
         debugPrint('[Sankofa.deploy] last_good promotion failed (best-effort): $e');
       }
     }
-    return count;
+  }
+
+  /// Arm the 10s auto-confirm safety net. Called from
+  /// [tryApplyStagedKbcPatch] on the success path so a host that forgets
+  /// to call [notifyKbcPatchReady] still gets chain-safety semantics:
+  /// if the app survives 10s after a successful apply, the patch is
+  /// trusted (counter reset + active→last_good promoted) automatically.
+  ///
+  /// Mirrors RN's [HEALTH_CONFIRM_MS] timer. Idempotent — calling twice
+  /// cancels the previous arm.
+  void _armAutoConfirmTimer({Duration delay = kKbcAutoConfirmDelay}) {
+    _autoConfirmTimer?.cancel();
+    _autoConfirmTimer = Timer(delay, () async {
+      _autoConfirmTimer = null;
+      try {
+        await _confirmHealthInternal();
+        if (kDebugMode) {
+          debugPrint(
+            '[Sankofa.deploy] auto-confirm fired (host did not call '
+            'notifyKbcPatchReady within ${delay.inSeconds}s) — patch trusted.',
+          );
+        }
+      } catch (e) {
+        if (kDebugMode) {
+          debugPrint('[Sankofa.deploy] auto-confirm failed: $e');
+        }
+      }
+    });
   }
 
   /// Copy active/patch.skdp → last_good/patch.skdp. Called by
@@ -1060,6 +1122,8 @@ class SankofaDeploy implements SankofaModule {
   /// Tear down the platform plugin. Called by `Sankofa.dispose()`;
   /// hosts almost never need this directly.
   Future<void> shutdown() async {
+    _autoConfirmTimer?.cancel();
+    _autoConfirmTimer = null;
     if (!_ready) return;
     await SankofaDeployPlatform.instance.shutdown();
     _ready = false;
