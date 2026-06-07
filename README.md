@@ -174,6 +174,8 @@ Sankofa.instance.pulse.on(PulseEvent.surveyCompleted, (e) {
 });
 ```
 
+**Targeting:** rules are AND-ed and evaluated on-device. For **Screen** rules, tag screens with `Sankofa.instance.screen('…')` (or `SankofaNavigatorObserver`). **User-property** rules read traits from `setPerson`, **Event** rules read on-device `track()` counts, **Cohort** rules are resolved server-side via the handshake, and **Feature-flag** rules read `SankofaSwitch`. **URL rules are web-only and ignored on Flutter — use a Screen rule.** Supply data the SDK can't see itself via `Sankofa.instance.pulse.setDefaultTargetingContext(userProperties: …, cohorts: …, flagValues: …)` or per-call `show(..., properties: …, cohorts: …)`.
+
 ---
 
 ## 🪤 Native crash bridge (Phase C)

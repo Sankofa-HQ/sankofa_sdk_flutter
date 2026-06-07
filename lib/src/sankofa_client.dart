@@ -203,6 +203,32 @@ class Sankofa {
   // (identity, session, the unified handshake other modules depend on)
   // still runs, so Catch/Switch/Config/Pulse/Deploy are unaffected.
   bool _analyticsEnabled = true;
+
+  // ── Local targeting state (read by Pulse) ─────────────────────────
+  //
+  // Pulse evaluates targeting rules on-device, so it needs the data
+  // the rules reference. The core owns these caches because `track()`
+  // and `peopleSet()` live here — Pulse reads them via the getters
+  // below when building its eligibility context.
+  //
+  // User traits last set via peopleSet/setPerson, persisted so
+  // `user_property` rules still resolve on a cold start before the host
+  // re-sets them this session.
+  static const String _userTraitsKey = 'sankofa:user_traits';
+  final Map<String, Object?> _userTraits = {};
+  // Recent custom-event timestamps (epoch ms) keyed by event name, for
+  // `event` targeting rules. On-device only and bounded — see
+  // [_eventRetention] / [_maxEventTimestamps]. Counts since app start /
+  // the retention window, NOT the server's full history.
+  final Map<String, List<int>> _recentEventTimestamps = {};
+  static const Duration _eventRetention = Duration(days: 30);
+  static const int _maxEventTimestamps = 50;
+
+  // Listeners notified whenever the tagged screen changes (via screen()
+  // or SankofaNavigatorObserver). Pulse subscribes so screen-targeted
+  // auto-show surveys re-evaluate on navigation, not just app-load /
+  // resume / fetch.
+  final List<void Function(String screen)> _screenChangeListeners = [];
   // Re-entrancy guard: prevents two overlapping init() calls (rebuild, hot
   // restart, failed-then-retry) from both proceeding and double-registering
   // observers / leaking a second flush timer + presence heartbeat.
@@ -276,6 +302,33 @@ class Sankofa {
   /// Current session manager — modules needing session_id (Catch for
   /// replay linking) read from here.
   SankofaSessionManager? get sessionManager => _isInitialized ? _sessionManager : null;
+
+  /// Snapshot of the user traits last set via [peopleSet] / [setPerson]
+  /// (persisted across launches). Pulse reads this to resolve
+  /// `user_property` targeting rules without the host re-passing them.
+  Map<String, Object?> get userTraitsSnapshot => Map.unmodifiable(_userTraits);
+
+  /// Per-event-name counts of custom events tracked on THIS device
+  /// within [window] (default 30 days, the retention cap). Pulse reads
+  /// this for `event` targeting rules. Note: on-device only — it does
+  /// not see events from other devices or before the SDK started.
+  Map<String, int> recentEventCounts({Duration window = _eventRetention}) {
+    final cutoff = DateTime.now().millisecondsSinceEpoch - window.inMilliseconds;
+    final out = <String, int>{};
+    _recentEventTimestamps.forEach((name, stamps) {
+      final n = stamps.where((ms) => ms >= cutoff).length;
+      if (n > 0) out[name] = n;
+    });
+    return out;
+  }
+
+  /// Subscribe to tagged-screen changes. Used by Pulse to re-evaluate
+  /// screen-targeted auto-show surveys on navigation. Returns a function
+  /// that removes the listener.
+  void Function() addScreenChangeListener(void Function(String screen) cb) {
+    _screenChangeListeners.add(cb);
+    return () => _screenChangeListeners.remove(cb);
+  }
 
   /// Initializes the Sankofa SDK with your [apiKey].
   ///
@@ -601,6 +654,7 @@ class Sankofa {
 
     await _identity.load();
     await _queueManager.load();
+    await _loadUserTraits();
 
     final deviceProps = await SankofaDeviceInfo.getProperties(_logger);
     _defaultProperties.addAll(deviceProps);
@@ -678,8 +732,20 @@ class Sankofa {
   Future<void> screen(String screenName, [Map<String, dynamic>? properties]) async {
     if (!_isInitialized) return;
 
+    final changed = screenName != _currentScreen;
     _currentScreen = screenName;
     _defaultProperties['\$screen_name'] = screenName;
+
+    // Notify subscribers (Pulse) so screen-targeted auto-show surveys
+    // re-evaluate on navigation. Only on an actual change — a re-tag of
+    // the same screen shouldn't re-pump. Listener errors are isolated.
+    if (changed) {
+      for (final cb in List.of(_screenChangeListeners)) {
+        try {
+          cb(screenName);
+        } catch (_) {/* a faulty listener never breaks screen tracking */}
+      }
+    }
 
     // Fire a standard screen_view event
     final screenProps = properties ?? {};
@@ -802,6 +868,18 @@ class Sankofa {
     await _queueManager.add(event);
     _logger.log('📝 Tracked: $eventName');
 
+    // Record for Pulse `event` targeting rules. Bounded ring per name:
+    // prune past the retention window and cap the list length so a
+    // chatty event can't grow unbounded.
+    final stamps = _recentEventTimestamps.putIfAbsent(eventName, () => <int>[]);
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    stamps.add(nowMs);
+    final cutoff = nowMs - _eventRetention.inMilliseconds;
+    stamps.removeWhere((ms) => ms < cutoff);
+    if (stamps.length > _maxEventTimestamps) {
+      stamps.removeRange(0, stamps.length - _maxEventTimestamps);
+    }
+
     // Check for High Fidelity Triggers
     if (_replayConfig != null &&
         _replayConfig!.highFidelityTriggers.contains(eventName)) {
@@ -840,6 +918,10 @@ class Sankofa {
   /// Sets profile attributes for the current user.
   Future<void> peopleSet(Map<String, dynamic> properties) async {
     if (!_isInitialized) return;
+    // Cache locally (and persist) so Pulse `user_property` rules can
+    // resolve against these traits — including on the next cold start.
+    _userTraits.addAll(properties);
+    unawaited(_persistUserTraits());
     final event = SankofaPeople.createProfileEvent(
       distinctId: _identity.distinctId,
       sessionId: _sessionManager.sessionId!,
@@ -848,6 +930,27 @@ class Sankofa {
     );
     await _queueManager.add(event);
     await _queueManager.flush();
+  }
+
+  /// Persist [_userTraits] for cold-start targeting. Best-effort.
+  Future<void> _persistUserTraits() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_userTraitsKey, jsonEncode(_userTraits));
+    } catch (_) {/* best-effort — targeting still works in-session */}
+  }
+
+  /// Hydrate [_userTraits] from disk. Called once during init.
+  Future<void> _loadUserTraits() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(_userTraitsKey);
+      if (raw == null || raw.isEmpty) return;
+      final decoded = jsonDecode(raw);
+      if (decoded is Map<String, dynamic>) {
+        _userTraits.addAll(decoded);
+      }
+    } catch (_) {/* best-effort */}
   }
 
   /// A convenience method to set common user traits like [name], [email], and [avatar].

@@ -76,9 +76,35 @@ class SankofaPulse with WidgetsBindingObserver implements SankofaModule {
   /// True while a survey dialog is on screen — suppresses auto-show stacking.
   bool _presenting = false;
 
+  /// True from the moment auto-show commits to a candidate until the
+  /// present attempt fully resolves. Bridges the `display_delay_ms`
+  /// window (where [_presenting] isn't set yet) so overlapping triggers
+  /// — navigation + resume + fetch — can't double-schedule the same or
+  /// a second survey.
+  bool _autoShowInFlight = false;
+
   /// Lifecycle event listener registry. Per-event buckets so an
   /// `onCompleted` subscriber doesn't run for `dismissed` events.
   final Map<PulseEvent, Set<PulseEventListener>> _listeners = {};
+
+  // ── Targeting context ───────────────────────────────────────────────
+  //
+  // Host-supplied defaults (see [setDefaultTargetingContext]). Merged
+  // OVER the SDK's auto-collected data and UNDER per-call overrides.
+  Map<String, Object?> _defaultUserProperties = const {};
+  Map<String, bool> _defaultCohorts = const {};
+  Map<String, Object?> _defaultFlagValues = const {};
+
+  /// Respondent's cohort memberships, delivered by the server handshake
+  /// (`modules.pulse.cohorts`). Cohort membership can't be computed
+  /// on-device, so the server resolves it and ships the map.
+  Map<String, bool> _serverCohorts = const {};
+
+  /// Per-survey response counts for the CURRENT respondent, for
+  /// `frequency_cap` rules. Best-effort + on-device (the server is
+  /// authoritative at submission time); hydrated on [register] and
+  /// bumped on every confirmed submit.
+  final Map<String, int> _responseCounts = {};
 
   @override
   SankofaModuleName get name => SankofaModuleName.pulseModule;
@@ -122,9 +148,18 @@ class SankofaPulse with WidgetsBindingObserver implements SankofaModule {
     SankofaModuleRegistry.instance.register(this);
     // Re-evaluate auto-show on app foreground (mirrors iOS/Android).
     WidgetsBinding.instance.addObserver(this);
+    // …and on navigation, so a screen-targeted survey gets its chance on
+    // the screen it targets — not only at app-load / resume / fetch.
+    // The dashboard's "auto-show on each navigation" depends on this.
+    // register() is idempotent (single subscription); Pulse is a
+    // process-lifetime singleton, so we never need to unsubscribe.
+    host.addScreenChangeListener((_) => maybeAutoShow());
     // App version comes from a platform channel — load it once now
     // so submit-time enrichment doesn't have to wait on it.
     unawaited(_loadAppVersion());
+    // Hydrate this respondent's frequency-cap response counts so the
+    // first auto-show eligibility check already respects the cap.
+    unawaited(_hydrateResponseCounts());
     // First refresh fires off-frame so register() doesn't block the
     // host's app boot. Subsequent refreshes are driven by the Traffic
     // Cop every time a fresh handshake lands.
@@ -139,6 +174,19 @@ class SankofaPulse with WidgetsBindingObserver implements SankofaModule {
     final on = config['enabled'] as bool? ?? true;
     _enabled = on;
     if (!on) return;
+
+    // Cohort memberships for this respondent, resolved server-side
+    // (cohort membership can't be computed on-device). Shape:
+    // `"cohorts": { "<cohort_id>": true, ... }`. Feeds `cohort`
+    // targeting rules. Absent on older servers — we keep the last map.
+    final rawCohorts = config['cohorts'];
+    if (rawCohorts is Map) {
+      final parsed = <String, bool>{};
+      rawCohorts.forEach((k, v) {
+        if (k is String && v == true) parsed[k] = true;
+      });
+      _serverCohorts = Map.unmodifiable(parsed);
+    }
 
     // The unified handshake may inline a partial survey list (small
     // payload optimisation). Take it if present so the very first
@@ -203,7 +251,11 @@ class SankofaPulse with WidgetsBindingObserver implements SankofaModule {
   /// refresh) plus the local targeting evaluator — same evaluator
   /// the Web/RN/iOS/Android SDKs use, and a byte-for-byte mirror of
   /// the Go server-side implementation.
-  Future<List<PulseSurvey>> activeMatchingSurveys() async {
+  Future<List<PulseSurvey>> activeMatchingSurveys({
+    Map<String, Object?> properties = const {},
+    Map<String, Object?> flags = const {},
+    Map<String, bool> cohorts = const {},
+  }) async {
     if (_cached.isEmpty) {
       final pending = _refreshFuture;
       if (pending != null) {
@@ -216,15 +268,12 @@ class SankofaPulse with WidgetsBindingObserver implements SankofaModule {
     final out = <PulseSurvey>[];
     for (final s in _cached) {
       final rules = _targetingRules[s.id] ?? const <PulseTargetingRule>[];
-      if (rules.isEmpty) {
-        out.add(s);
-        continue;
-      }
-      final decision = _evaluateLocally(
-        surveyId: s.id,
-        rules: rules,
-        properties: const {},
-        flags: const {},
+      final decision = _eligible(
+        s.id,
+        rules,
+        properties: properties,
+        flags: flags,
+        cohorts: cohorts,
       );
       if (decision.eligible) out.add(s);
     }
@@ -296,6 +345,7 @@ class SankofaPulse with WidgetsBindingObserver implements SankofaModule {
     required String surveyId,
     Map<String, Object?> properties = const {},
     Map<String, Object?> flags = const {},
+    Map<String, bool> cohorts = const {},
   }) async {
     if (!_registered) {
       if (kDebugMode) {
@@ -323,11 +373,12 @@ class SankofaPulse with WidgetsBindingObserver implements SankofaModule {
       }
       return;
     }
-    final decision = _evaluateLocally(
-      surveyId: surveyId,
-      rules: bundle.targetingRules,
+    final decision = _eligible(
+      surveyId,
+      bundle.targetingRules,
       properties: properties,
       flags: flags,
+      cohorts: cohorts,
     );
     if (!decision.eligible) {
       if (kDebugMode) {
@@ -377,6 +428,7 @@ class SankofaPulse with WidgetsBindingObserver implements SankofaModule {
     String surveyId, {
     Map<String, Object?> properties = const {},
     Map<String, Object?> flags = const {},
+    Map<String, bool> cohorts = const {},
   }) async {
     if (!_registered) {
       return const PulseDecision(eligible: false, reason: 'pulse not registered');
@@ -396,37 +448,122 @@ class SankofaPulse with WidgetsBindingObserver implements SankofaModule {
     if (bundle.survey.id.isEmpty) {
       return const PulseDecision(eligible: false, reason: 'survey not found');
     }
-    return _evaluateLocally(
-      surveyId: surveyId,
-      rules: bundle.targetingRules,
+    return _eligible(
+      surveyId,
+      bundle.targetingRules,
       properties: properties,
       flags: flags,
+      cohorts: cohorts,
     );
   }
 
-  PulseDecision _evaluateLocally({
-    required String surveyId,
-    required List<PulseTargetingRule> rules,
-    required Map<String, Object?> properties,
-    required Map<String, Object?> flags,
+  /// Provide host-known targeting context the SDK can't collect on its
+  /// own — extra user properties, cohort memberships, or feature-flag
+  /// overrides. Merged OVER the SDK's auto-collected data (traits set
+  /// via `setPerson`, events from `track`, server cohorts, Switch
+  /// flags) and UNDER any context passed directly to [show] /
+  /// [isEligible]. Safe to call repeatedly; re-evaluates auto-show.
+  void setDefaultTargetingContext({
+    Map<String, Object?>? userProperties,
+    Map<String, bool>? cohorts,
+    Map<String, Object?>? flagValues,
   }) {
-    if (rules.isEmpty) return const PulseDecision(eligible: true);
-    final host = Sankofa.instance;
-    final identity = host.identity;
-    // Populate the current screen so `screen`/`url` targeting rules can match.
-    // Without this every screen-targeted survey was permanently ineligible on
-    // Flutter (the evaluator saw an empty screenName).
-    final screen = host.hasTaggedScreen ? host.currentScreen : null;
-    final ctx = PulseEligibilityContext(
-      surveyId: surveyId,
-      respondentExternalId: identity?.distinctId ?? '',
-      userProperties: properties,
-      flagValues: _mergeWithSwitchFlags(flags),
-      screenName: screen,
-      pageUrl: screen,
-    );
-    return evaluatePulseTargeting(rules, ctx);
+    if (userProperties != null) {
+      _defaultUserProperties = Map.unmodifiable(userProperties);
+    }
+    if (cohorts != null) _defaultCohorts = Map.unmodifiable(cohorts);
+    if (flagValues != null) _defaultFlagValues = Map.unmodifiable(flagValues);
+    if (_registered) maybeAutoShow();
   }
+
+  /// Build the full eligibility context. Precedence, lowest → highest:
+  /// SDK-collected data → host defaults ([setDefaultTargetingContext])
+  /// → per-call overrides.
+  PulseEligibilityContext _buildEligibilityContext(
+    String surveyId, {
+    Map<String, Object?> properties = const {},
+    Map<String, Object?> flags = const {},
+    Map<String, bool> cohorts = const {},
+  }) {
+    final host = Sankofa.instance;
+    final screen = host.hasTaggedScreen ? host.currentScreen : null;
+    return PulseEligibilityContext(
+      surveyId: surveyId,
+      respondentExternalId: host.identity?.distinctId ?? '',
+      userProperties: <String, Object?>{
+        ...host.userTraitsSnapshot,
+        ..._defaultUserProperties,
+        ...properties,
+      },
+      cohorts: <String, bool>{
+        ..._serverCohorts,
+        ..._defaultCohorts,
+        ...cohorts,
+      },
+      flagValues: _mergeWithSwitchFlags(<String, Object?>{
+        ..._defaultFlagValues,
+        ...flags,
+      }),
+      recentEvents: host.recentEventCounts(),
+      priorResponseCount: Map<String, int>.from(_responseCounts),
+      screenName: screen,
+      // pageUrl is intentionally null — Flutter is screen-based. URL
+      // rules are web-only and are dropped in [_eligible] so they can't
+      // block a survey under the dashboard's AND semantics.
+      pageUrl: null,
+    );
+  }
+
+  /// Targeting decision for [surveyId]. Drops `url` rules first — URL
+  /// targeting describes web routes and has no page URL on Flutter, so
+  /// under the dashboard's "every rule must match" (AND) semantics a
+  /// URL rule would silently block the survey. This mirrors how the Web
+  /// SDKs ignore `screen` rules; on Flutter, use a `screen` rule.
+  PulseDecision _eligible(
+    String surveyId,
+    List<PulseTargetingRule> rules, {
+    Map<String, Object?> properties = const {},
+    Map<String, Object?> flags = const {},
+    Map<String, bool> cohorts = const {},
+  }) {
+    final effective = rules
+        .where((r) => r.kind != PulseRuleKind.url)
+        .toList(growable: false);
+    if (kDebugMode && effective.length != rules.length) {
+      debugPrint(
+        '[Sankofa] Pulse: ignored ${rules.length - effective.length} URL '
+        'rule(s) for "$surveyId" — URL targeting is web-only; use a Screen '
+        'rule on Flutter.',
+      );
+    }
+    if (effective.isEmpty) return const PulseDecision(eligible: true);
+    final ctx = _buildEligibilityContext(
+      surveyId,
+      properties: properties,
+      flags: flags,
+      cohorts: cohorts,
+    );
+    return evaluatePulseTargeting(effective, ctx);
+  }
+
+  /// Test seam over [_eligible] — exercises URL-rule dropping and the
+  /// full context-merge (SDK-collected + defaults + per-call) the way
+  /// auto-show does, without needing a network round-trip.
+  @visibleForTesting
+  PulseDecision debugEligible(
+    String surveyId,
+    List<PulseTargetingRule> rules, {
+    Map<String, Object?> properties = const {},
+    Map<String, Object?> flags = const {},
+    Map<String, bool> cohorts = const {},
+  }) =>
+      _eligible(surveyId, rules,
+          properties: properties, flags: flags, cohorts: cohorts);
+
+  /// Test seam — seed cohort memberships as if a handshake delivered them.
+  @visibleForTesting
+  void debugSetServerCohorts(Map<String, bool> cohorts) =>
+      _serverCohorts = Map.unmodifiable(cohorts);
 
   /// Merge SankofaSwitch flag values into the eligibility context
   /// so feature_flag rules can target without the host re-passing
@@ -563,7 +700,13 @@ class SankofaPulse with WidgetsBindingObserver implements SankofaModule {
   /// Re-evaluate auto-show. Safe to call repeatedly — a no-op while a survey
   /// is already on screen, auto-show is disabled, or nothing is eligible.
   Future<void> maybeAutoShow() async {
-    if (!_registered || !_enabled || !autoShowEnabled || _presenting) return;
+    if (!_registered ||
+        !_enabled ||
+        !autoShowEnabled ||
+        _presenting ||
+        _autoShowInFlight) {
+      return;
+    }
     final ctx = _resolvePresentationContext();
     if (ctx == null) return; // tree not built yet — retries on next refresh/resume
     if (_cached.isEmpty) return;
@@ -577,15 +720,11 @@ class SankofaPulse with WidgetsBindingObserver implements SankofaModule {
       if (_shownThisSession.contains(s.id)) continue;
       final d = _display[s.id];
       if (d != null && !d.autoShow) continue;
-      // Targeting.
+      // Targeting. URL rules are dropped inside _eligible (web-only);
+      // user_property / event / cohort / frequency_cap resolve against
+      // the SDK's auto-collected + host-provided context.
       final rules = _targetingRules[s.id] ?? const <PulseTargetingRule>[];
-      if (rules.isNotEmpty &&
-          !_evaluateLocally(
-            surveyId: s.id,
-            rules: rules,
-            properties: const {},
-            flags: const {},
-          ).eligible) {
+      if (rules.isNotEmpty && !_eligible(s.id, rules).eligible) {
         continue;
       }
       // Dismiss cooldown.
@@ -600,13 +739,28 @@ class SankofaPulse with WidgetsBindingObserver implements SankofaModule {
     }
     if (candidate == null) return;
 
+    // Claim the slot NOW — across the (possibly multi-second)
+    // display_delay window and the present attempt — so a concurrent
+    // navigation/resume/fetch trigger can't schedule a second survey
+    // before this one lands. Cleared in present()'s finally whether or
+    // not we actually show (e.g. the re-check below fails because the
+    // user navigated away during the delay).
+    _autoShowInFlight = true;
+
     final delayMs = _display[candidate.id]?.delayMs ?? 0;
     final id = candidate.id;
     Future<void> present() async {
-      if (_presenting) return;
-      final c2 = _resolvePresentationContext();
-      if (c2 == null) return;
-      await show(c2, surveyId: id);
+      try {
+        if (_presenting) return;
+        final c2 = _resolvePresentationContext();
+        if (c2 == null) return;
+        // show() re-evaluates targeting against the CURRENT context, so a
+        // screen-targeted survey that the user has navigated away from
+        // during the delay is correctly skipped.
+        await show(c2, surveyId: id);
+      } finally {
+        _autoShowInFlight = false;
+      }
     }
 
     if (delayMs > 0) {
@@ -629,6 +783,43 @@ class SankofaPulse with WidgetsBindingObserver implements SankofaModule {
         DateTime.now().millisecondsSinceEpoch,
       );
     } catch (_) {/* best-effort */}
+  }
+
+  // ── Frequency-cap response counts ────────────────────────────────────
+  //
+  // On-device tally of confirmed submissions per survey, for the current
+  // respondent. The server is authoritative (it evaluates frequency caps
+  // at submission), but counting locally lets `frequency_cap` rules gate
+  // auto-show before a redundant survey is even presented.
+  String _responseCountKey(String respondent, String surveyId) =>
+      'sankofa.pulse.responses.$respondent.$surveyId';
+
+  /// Load this respondent's per-survey response counts into memory so
+  /// `frequency_cap` rules resolve from the first eligibility check.
+  Future<void> _hydrateResponseCounts() async {
+    try {
+      final respondent = Sankofa.instance.identity?.distinctId ?? '';
+      final prefix = 'sankofa.pulse.responses.$respondent.';
+      final prefs = await SharedPreferences.getInstance();
+      for (final key in prefs.getKeys()) {
+        if (!key.startsWith(prefix)) continue;
+        final surveyId = key.substring(prefix.length);
+        final n = prefs.getInt(key);
+        if (n != null && n > 0) _responseCounts[surveyId] = n;
+      }
+    } catch (_) {/* best-effort */}
+  }
+
+  /// Increment the confirmed-response tally for [surveyId] (memory +
+  /// disk) after a server-confirmed submit.
+  Future<void> _bumpResponseCount(String surveyId) async {
+    final next = (_responseCounts[surveyId] ?? 0) + 1;
+    _responseCounts[surveyId] = next;
+    try {
+      final respondent = Sankofa.instance.identity?.distinctId ?? '';
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setInt(_responseCountKey(respondent, surveyId), next);
+    } catch (_) {/* best-effort — in-memory count still applies */}
   }
 
   // ── Partial save scheduler ──────────────────────────────────────────
@@ -701,6 +892,9 @@ class SankofaPulse with WidgetsBindingObserver implements SankofaModule {
     unawaited(() async {
       try {
         final resp = await c.submit(payload);
+        // Count the confirmed response so `frequency_cap` rules gate
+        // future auto-shows for this respondent.
+        unawaited(_bumpResponseCount(surveyId));
         // Fire SURVEY_COMPLETED with the server-issued response id
         // so hosts can correlate against dashboard rows.
         _emit(PulseEventPayload(
