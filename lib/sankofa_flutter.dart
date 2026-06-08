@@ -32,6 +32,13 @@ export 'src/config/item_decision.dart'
 export 'src/deploy/sankofa_deploy.dart' show SankofaDeploy, KbcStagedPatchInfo;
 export 'src/deploy/deploy_config.dart' show SankofaDeployOptions;
 export 'src/deploy/update_status.dart' show UpdateStatus;
+// Shorebird-style developer-facing API (check + download + read current).
+export 'src/deploy/sankofa_update.dart'
+    show
+        SankofaUpdate,
+        SankofaCurrentPatch,
+        SankofaUpdateCheckResult,
+        SankofaUpdateStatus;
 // β.3 + ε + β.4 + η — Sankofa Deploy: Flutter Code KBC patch apply API (iOS Path C).
 export 'src/deploy/kbc_envelope.dart'
     show

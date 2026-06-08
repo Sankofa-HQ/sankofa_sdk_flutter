@@ -534,10 +534,34 @@ class Sankofa {
     // `Sankofa.deploy.checkForUpdate()` call.
     Future<void>? deployReady;
     if (enableDeploy && SankofaDeploy.instance == null) {
+      // Resolve appVersion in priority order:
+      //   1. explicit `appVersion:` argument to `Sankofa.init`
+      //   2. `_defaultProperties['$app_version']` (track-time backfill)
+      //   3. fallback to PackageInfo's pubspec version
+      String? resolvedAppVersion = appVersion;
+      if (resolvedAppVersion == null || resolvedAppVersion.isEmpty) {
+        resolvedAppVersion = _defaultProperties[r'$app_version'];
+      }
+      if (resolvedAppVersion == null || resolvedAppVersion.isEmpty) {
+        try {
+          final info = await PackageInfo.fromPlatform();
+          if (info.version.isNotEmpty) {
+            resolvedAppVersion = info.version;
+          }
+        } catch (_) {
+          // PackageInfo may fail on web / test envs — leave null, deploy
+          // calls will require an explicit appVersion arg in that case.
+        }
+      }
+
       deployReady = SankofaDeploy.initInternal(
         apiKey: apiKey,
         endpoint: endpoint,
         options: deployOptions,
+        appVersion: resolvedAppVersion,
+        // Pass a getter so identify()/reset() flips reflect in
+        // subsequent deploy calls without a re-init.
+        distinctIdResolver: () => _identity.distinctId,
       ).then((deploy) async {
         // Post-init integration self-audit. Warns in debug mode when
         // the host's manifest, MainActivity, permissions, or meta-data

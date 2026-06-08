@@ -32,11 +32,12 @@ import 'dart:convert' show jsonDecode;
 import 'dart:io' show File, Directory;
 import 'dart:typed_data';
 
-import 'package:crypto/crypto.dart' show sha256;
+import 'package:crypto/crypto.dart' show Digest, sha256;
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart' show getApplicationDocumentsDirectory;
 
 import 'kbc_loader.dart';
+import 'sankofa_update.dart';
 
 /// Outcome of [fetchAndApplyKbcPatch].
 ///
@@ -85,6 +86,236 @@ class KbcFetchException implements Exception {
   String toString() => 'KbcFetchException: $message'
       '${statusCode != null ? ' (HTTP $statusCode)' : ''}'
       '${cause != null ? ' (caused by $cause)' : ''}';
+}
+
+/// Shorebird-style "is there a patch?" probe — checks the server and
+/// returns metadata WITHOUT downloading. Use this when you want to
+/// gate the actual download behind a user prompt (optional updates)
+/// or to skip the prompt entirely (mandatory updates).
+///
+/// Returns a [SankofaUpdateCheckResult] whose `status` is one of:
+///
+///   - [SankofaUpdateStatus.upToDate]      — no new patch
+///   - [SankofaUpdateStatus.outdated]      — new patch in `update`
+///   - [SankofaUpdateStatus.unavailable]   — transient network/5xx
+///   - [SankofaUpdateStatus.invalidConfig] — 4xx (bad apiKey, etc.)
+///   - [SankofaUpdateStatus.bannedLocally] — server's latest matches a
+///                                            label the device's
+///                                            auto-rollback subsystem
+///                                            has flagged bad
+///
+/// Args mirror [fetchAndApplyKbcPatch] — same endpoint, same apiKey,
+/// same app/engine/distinct ids.
+Future<SankofaUpdateCheckResult> checkForKbcUpdate({
+  required String endpoint,
+  required String apiKey,
+  required String appVersion,
+  required String engineVersion,
+  required String distinctId,
+  String platform = 'ios',
+  String? currentLabel,
+  Duration timeout = const Duration(seconds: 30),
+  Set<String>? bannedLabels,
+}) async {
+  final base = endpoint.endsWith('/')
+      ? endpoint.substring(0, endpoint.length - 1)
+      : endpoint;
+  final qp = <String, String>{
+    'app_version': appVersion,
+    'distinct_id': distinctId,
+    'platform': platform,
+    'engine_version': engineVersion,
+    'runtime': 'flutter-code',
+    if (currentLabel != null) 'current_bundle_label': currentLabel,
+  };
+  final checkUri = Uri.parse('$base/api/deploy/check')
+      .replace(queryParameters: qp);
+
+  http.Response checkResp;
+  try {
+    checkResp = await http.get(
+      checkUri,
+      headers: {'x-api-key': apiKey},
+    ).timeout(timeout);
+  } catch (err) {
+    return SankofaUpdateCheckResult(
+      status: SankofaUpdateStatus.unavailable,
+      reason: 'network_error:check:$err',
+    );
+  }
+  if (checkResp.statusCode >= 500) {
+    return SankofaUpdateCheckResult(
+      status: SankofaUpdateStatus.unavailable,
+      reason: 'server_error:check:HTTP ${checkResp.statusCode}',
+    );
+  }
+  if (checkResp.statusCode != 200) {
+    return SankofaUpdateCheckResult(
+      status: SankofaUpdateStatus.invalidConfig,
+      reason: 'check returned HTTP ${checkResp.statusCode}: ${checkResp.body}',
+    );
+  }
+
+  Map<String, dynamic> body;
+  try {
+    final decoded = jsonDecode(checkResp.body);
+    if (decoded is! Map) {
+      return const SankofaUpdateCheckResult(
+        status: SankofaUpdateStatus.invalidConfig,
+        reason: 'check response not a JSON object',
+      );
+    }
+    body = Map<String, dynamic>.from(decoded);
+  } catch (err) {
+    return SankofaUpdateCheckResult(
+      status: SankofaUpdateStatus.invalidConfig,
+      reason: 'check response malformed: $err',
+    );
+  }
+
+  if (body['has_update'] != true) {
+    return SankofaUpdateCheckResult(
+      status: SankofaUpdateStatus.upToDate,
+      reason: body['reason']?.toString(),
+    );
+  }
+
+  final label = body['label']?.toString() ?? '';
+  if (bannedLabels != null && bannedLabels.contains(label)) {
+    return const SankofaUpdateCheckResult(
+      status: SankofaUpdateStatus.bannedLocally,
+      reason: 'label_banned_locally',
+    );
+  }
+
+  final downloadUrl = body['download_url']?.toString() ?? '';
+  final expectedSha = body['sha256']?.toString() ?? '';
+  if (downloadUrl.isEmpty || expectedSha.isEmpty) {
+    return const SankofaUpdateCheckResult(
+      status: SankofaUpdateStatus.invalidConfig,
+      reason: 'check response missing download_url or sha256',
+    );
+  }
+
+  return SankofaUpdateCheckResult(
+    status: SankofaUpdateStatus.outdated,
+    update: SankofaUpdate(
+      label: label,
+      releaseId: body['release_id']?.toString() ?? '',
+      downloadUrl: downloadUrl,
+      sha256: expectedSha,
+      sizeBytes: (body['size'] as num?)?.toInt() ?? 0,
+      isMandatory: body['is_mandatory'] == true,
+    ),
+  );
+}
+
+/// Download an envelope previously discovered via [checkForKbcUpdate]
+/// to the conventional staged path so [SankofaDeploy.tryApplyStagedKbcPatch]
+/// picks it up on the next launch.
+///
+/// Uses HTTP streaming so [onProgress] fires once per chunk with the
+/// running `(received, total)` byte counts. `total` matches
+/// [SankofaUpdate.sizeBytes] when the server included a Content-Length;
+/// otherwise it falls back to that field.
+///
+/// Verifies the streamed bytes against [SankofaUpdate.sha256] before
+/// persisting — a mid-flight corruption raises [KbcFetchException]
+/// and the partial file is deleted.
+///
+/// Returns the absolute on-disk path where the envelope was persisted.
+Future<String> downloadKbcUpdateToFile(
+  SankofaUpdate update, {
+  void Function(int received, int total)? onProgress,
+  Duration timeout = const Duration(minutes: 5),
+}) async {
+  final docsDir = await getApplicationDocumentsDirectory();
+  final patchDir = Directory(
+      '${docsDir.path}/sankofa-deploy/patches/active');
+  if (!patchDir.existsSync()) {
+    patchDir.createSync(recursive: true);
+  }
+  final patchFile = File('${patchDir.path}/patch.skdp');
+  final tmpFile = File('${patchFile.path}.partial');
+  if (tmpFile.existsSync()) {
+    tmpFile.deleteSync();
+  }
+
+  final client = http.Client();
+  try {
+    final req = http.Request('GET', Uri.parse(update.downloadUrl));
+    final resp = await client.send(req).timeout(timeout);
+    if (resp.statusCode >= 500 || resp.statusCode == 403) {
+      throw KbcFetchException(
+        'storage_error:download:HTTP ${resp.statusCode}',
+        statusCode: resp.statusCode,
+      );
+    }
+    if (resp.statusCode != 200) {
+      throw KbcFetchException(
+        'envelope download returned HTTP ${resp.statusCode}',
+        statusCode: resp.statusCode,
+      );
+    }
+
+    final total = resp.contentLength ?? update.sizeBytes;
+    int received = 0;
+    final sink = tmpFile.openWrite();
+    final hasher = sha256.startChunkedConversion(_HashSink());
+
+    try {
+      await for (final chunk in resp.stream) {
+        sink.add(chunk);
+        hasher.add(chunk);
+        received += chunk.length;
+        if (onProgress != null) {
+          onProgress(received, total);
+        }
+      }
+      await sink.flush();
+      await sink.close();
+      hasher.close();
+    } catch (err) {
+      try {
+        await sink.close();
+      } catch (_) {}
+      if (tmpFile.existsSync()) tmpFile.deleteSync();
+      rethrow;
+    }
+
+    final actualSha = (hasher as dynamic).result;
+    if (actualSha != update.sha256) {
+      if (tmpFile.existsSync()) tmpFile.deleteSync();
+      throw KbcFetchException(
+        'transport sha mismatch: server said ${update.sha256}, got $actualSha — '
+        'envelope is corrupt or download was tampered',
+      );
+    }
+
+    // Atomic rename: only swap into place once the bytes are fully verified.
+    if (patchFile.existsSync()) {
+      patchFile.deleteSync();
+    }
+    tmpFile.renameSync(patchFile.path);
+    return patchFile.path;
+  } finally {
+    client.close();
+  }
+}
+
+/// Capture-style sink that accumulates a SHA-256 digest from chunked
+/// input. Used by [downloadKbcUpdateToFile] to verify the streamed
+/// envelope without buffering the whole file in memory.
+class _HashSink implements Sink<Digest> {
+  String? _hex;
+  String? get result => _hex;
+  @override
+  void add(Digest data) {
+    _hex = data.toString();
+  }
+
+  @override
+  void close() {}
 }
 
 /// Hit the server, fetch a KBC patch envelope if one is available,

@@ -164,12 +164,24 @@ class SankofaBootstrap {
     // Auto-enable Deploy when a loader was provided.
     final enableDeploy = options.enableDeploy ?? (options.loader != null);
 
+    // If sankofa.yaml carried an engine_version and the host's
+    // deployOptions didn't already set one, forward it as the default
+    // so `Sankofa.deploy.checkForKbcUpdate()` doesn't require the host
+    // to repeat the engine identity on every call.
+    SankofaDeployOptions effectiveDeployOptions = options.deployOptions;
+    if (engineVersion.isNotEmpty &&
+        (effectiveDeployOptions.engineVersion == null ||
+            effectiveDeployOptions.engineVersion!.isEmpty)) {
+      effectiveDeployOptions =
+          effectiveDeployOptions.copyWith(engineVersion: engineVersion);
+    }
+
     await Sankofa.instance.init(
       apiKey: apiKey,
       endpoint: endpoint,
       debug: options.debug,
       enableDeploy: enableDeploy,
-      deployOptions: options.deployOptions,
+      deployOptions: effectiveDeployOptions,
       // Respect overrides; otherwise leave init() defaults alone.
       enableCatch: options.enableCatch ?? true,
       enableAnalytics: options.enableAnalytics ?? true,

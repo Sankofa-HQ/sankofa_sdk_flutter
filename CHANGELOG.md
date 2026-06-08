@@ -1,6 +1,57 @@
 # Changelog
 
-## 0.2.1 — Release-mode crash fix, replay fixes, restore missing iOS podspec
+## 0.2.1 — Shorebird-style developer API + customer-blocking fixes
+
+**New: Shorebird-compatible update API** for hosts that want to drive
+their own "Update available?" UX. All arguments are optional —
+defaults fall through to whatever the host passed to
+`Sankofa.instance.init(enableDeploy: true)`:
+
+```dart
+// Initialize once at app start (boilerplate-free; deploy inherits
+// apiKey, endpoint, appVersion, distinctId, and engineVersion from
+// here).
+await Sankofa.instance.init(
+  apiKey: 'sk_live_…',
+  appVersion: '1.2.0',
+  enableDeploy: true,
+  deployOptions: const SankofaDeployOptions(
+    engineVersion: '3.44.0+sankofa-1',
+    signingPubkeyB64: '…',
+  ),
+);
+
+// Later, anywhere in the app:
+final result = await Sankofa.instance.deploy?.checkForKbcUpdate();
+if (result?.hasUpdate == true) {
+  final update = result!.update!;
+  if (update.isMandatory) {
+    await Sankofa.instance.deploy?.downloadKbcUpdate(update);
+  } else {
+    final yes = await showUpdateDialog(context, update);
+    if (yes) {
+      await Sankofa.instance.deploy?.downloadKbcUpdate(
+        update,
+        onProgress: (rx, total) => setState(() => _progress = rx / total),
+      );
+    }
+  }
+}
+
+final current = await Sankofa.instance.deploy?.readCurrentKbcPatch();
+print('Currently on ${current?.label ?? "baseline"}');
+```
+
+If you use `Sankofa.bootstrap` (recommended), the `engine_version` is
+also auto-read from `sankofa.yaml` — your call drops to literally
+`Sankofa.instance.deploy?.checkForKbcUpdate()`.
+
+New types exported from `package:sankofa_flutter/sankofa_flutter.dart`:
+`SankofaUpdate`, `SankofaCurrentPatch`, `SankofaUpdateCheckResult`,
+`SankofaUpdateStatus`. The all-in-one `fetchAndApplyKbcPatch` still
+exists for hosts that don't need split control.
+
+
 
 **Customer-blocking release crash fix:** the heatmap snapshotter and
 the replay recorder both called `RenderObject.debugNeedsPaint`, which

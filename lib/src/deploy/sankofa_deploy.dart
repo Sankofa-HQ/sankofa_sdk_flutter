@@ -1,6 +1,6 @@
 import 'dart:async' show Timer;
 import 'dart:convert' show jsonEncode;
-import 'dart:io' show Directory, File;
+import 'dart:io' show Directory, File, Platform;
 
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
@@ -23,6 +23,7 @@ import 'kbc_fetch.dart' as kbc_fetch;
 import 'kbc_loader.dart' as kbc_loader;
 import 'kbc_loader.dart' show KbcPatchResult, KbcLoaderFn;
 import 'kbc_fetch.dart' show KbcFetchResult;
+import 'sankofa_update.dart';
 import 'update_status.dart';
 
 /// Read-only view of a KBC patch staged on disk — what
@@ -211,6 +212,84 @@ class SankofaDeploy implements SankofaModule {
   String? _ingestEndpoint;
   String? _ingestApiKey;
 
+  /// App version captured at init. Drives the `app_version` query
+  /// parameter on `/api/deploy/check` so the host doesn't have to
+  /// re-supply it on every call. `Sankofa.init(appVersion: ...)`
+  /// flows in here; `Sankofa.bootstrap` reads it from `pubspec.yaml`
+  /// via `package_info_plus` and forwards.
+  String? _defaultAppVersion;
+
+  /// Callback that returns the device's current distinct ID. Sourced
+  /// from `Sankofa.instance.identity?.distinctId` so the same ID the
+  /// analytics module uses also drives rollout hashing for patches.
+  /// A callback (rather than a captured string) keeps the resolved
+  /// value fresh across `identify()` / `reset()` calls.
+  String Function()? _distinctIdResolver;
+
+  /// Resolve a runtime platform string. Defaults to `'ios'` /
+  /// `'android'` via Platform.is*; can be overridden via
+  /// [SankofaDeployOptions.platformOverride] for tests.
+  String get _effectivePlatform {
+    final override = options.platformOverride;
+    if (override != null && override.isNotEmpty) return override;
+    if (Platform.isIOS) return 'ios';
+    if (Platform.isAndroid) return 'android';
+    return 'ios';
+  }
+
+  String _resolveDistinctId(String? explicit) {
+    if (explicit != null && explicit.isNotEmpty) return explicit;
+    try {
+      final fromResolver = _distinctIdResolver?.call();
+      if (fromResolver != null && fromResolver.isNotEmpty) {
+        return fromResolver;
+      }
+    } catch (_) {
+      /* fall through */
+    }
+    return 'anonymous';
+  }
+
+  String _resolveAppVersion(String? explicit) {
+    if (explicit != null && explicit.isNotEmpty) return explicit;
+    if (_defaultAppVersion != null && _defaultAppVersion!.isNotEmpty) {
+      return _defaultAppVersion!;
+    }
+    throw StateError(
+      'Sankofa.deploy: no appVersion in scope. Pass appVersion to '
+      'Sankofa.init() OR supply it directly to the check / download / '
+      'fetch call.',
+    );
+  }
+
+  String _resolveEngineVersion(String? explicit) {
+    if (explicit != null && explicit.isNotEmpty) return explicit;
+    final fromOptions = options.engineVersion;
+    if (fromOptions != null && fromOptions.isNotEmpty) return fromOptions;
+    throw StateError(
+      'Sankofa.deploy: no engineVersion in scope. Set engineVersion on '
+      'SankofaDeployOptions at init time (or via Sankofa.bootstrap, '
+      'which reads it from sankofa.yaml) OR pass it directly to the '
+      'check / download / fetch call.',
+    );
+  }
+
+  String _resolveEndpoint(String? explicit) {
+    if (explicit != null && explicit.isNotEmpty) return explicit;
+    if (_ingestEndpoint != null && _ingestEndpoint!.isNotEmpty) {
+      return _ingestEndpoint!;
+    }
+    throw StateError('Sankofa.deploy: endpoint missing (called before init?).');
+  }
+
+  String _resolveApiKey(String? explicit) {
+    if (explicit != null && explicit.isNotEmpty) return explicit;
+    if (_ingestApiKey != null && _ingestApiKey!.isNotEmpty) {
+      return _ingestApiKey!;
+    }
+    throw StateError('Sankofa.deploy: apiKey missing (called before init?).');
+  }
+
   /// Snapshot of the active server-distributed signing keys. Exposed
   /// mostly for debugging — production code never has to read this
   /// because the apply pipeline pulls it via [_effectiveSigningPubkeys].
@@ -255,11 +334,15 @@ class SankofaDeploy implements SankofaModule {
     required String apiKey,
     required String endpoint,
     required SankofaDeployOptions options,
+    String? appVersion,
+    String Function()? distinctIdResolver,
   }) async {
     if (_instance != null) return _instance!;
     final deploy = SankofaDeploy._(options: options);
     deploy._ingestEndpoint = endpoint;
     deploy._ingestApiKey = apiKey;
+    deploy._defaultAppVersion = appVersion;
+    deploy._distinctIdResolver = distinctIdResolver;
     // Register with the Traffic Cop BEFORE the platform init kicks off
     // so the first unified handshake (fired from Sankofa.init right
     // after this call returns) has a route for `modules.deploy`. The
@@ -452,13 +535,13 @@ class SankofaDeploy implements SankofaModule {
   /// Throws [KbcFetchException] on any HTTP / sha-mismatch / apply
   /// failure. The exception message names the most likely cause.
   Future<KbcFetchResult> fetchAndApplyKbcPatch({
-    required String endpoint,
-    required String apiKey,
-    required String appVersion,
-    required String engineVersion,
-    required String distinctId,
     required KbcLoaderFn loader,
-    String platform = 'ios',
+    String? endpoint,
+    String? apiKey,
+    String? appVersion,
+    String? engineVersion,
+    String? distinctId,
+    String? platform,
     String? currentLabel,
     bool persistToDisk = true,
     Duration timeout = const Duration(seconds: 30),
@@ -466,16 +549,18 @@ class SankofaDeploy implements SankofaModule {
     // Path C is pure Dart — see applyKbcPatchFromBytes above.
     // Prefix-call to avoid infinite recursion on the instance method.
     final banned = await getBannedKbcLabels();
+    final resolvedAppVersion = _resolveAppVersion(appVersion);
+    final resolvedPlatform = platform ?? _effectivePlatform;
     KbcFetchResult result;
     try {
       result = await kbc_fetch.fetchAndApplyKbcPatch(
-        endpoint: endpoint,
-        apiKey: apiKey,
-        appVersion: appVersion,
-        engineVersion: engineVersion,
-        distinctId: distinctId,
+        endpoint: _resolveEndpoint(endpoint),
+        apiKey: _resolveApiKey(apiKey),
+        appVersion: resolvedAppVersion,
+        engineVersion: _resolveEngineVersion(engineVersion),
+        distinctId: _resolveDistinctId(distinctId),
         loader: loader,
-        platform: platform,
+        platform: resolvedPlatform,
         currentLabel: currentLabel,
         persistToDisk: persistToDisk,
         timeout: timeout,
@@ -491,8 +576,8 @@ class SankofaDeploy implements SankofaModule {
       _reportKbcEvent(
         eventType: 'kbc_apply_failed',
         bundleLabel: currentLabel,
-        appVersion: appVersion,
-        platform: platform,
+        appVersion: resolvedAppVersion,
+        platform: resolvedPlatform,
         errorMessage: err.toString(),
         extra: {
           'phase': 'fetch_apply',
@@ -511,8 +596,8 @@ class SankofaDeploy implements SankofaModule {
         eventType: 'kbc_apply_success',
         releaseId: result.releaseId,
         bundleLabel: result.label,
-        appVersion: appVersion,
-        platform: platform,
+        appVersion: resolvedAppVersion,
+        platform: resolvedPlatform,
       );
     } else if (result.reason == 'label_banned_locally') {
       // Surface the skip so dashboards know "this device knows label X
@@ -522,11 +607,170 @@ class SankofaDeploy implements SankofaModule {
         eventType: 'kbc_apply_skipped_label_banned',
         releaseId: result.releaseId,
         bundleLabel: result.label,
-        appVersion: appVersion,
-        platform: platform,
+        appVersion: resolvedAppVersion,
+        platform: resolvedPlatform,
       );
     }
     return result;
+  }
+
+  // ── Shorebird-style developer-facing API ────────────────────────────
+  //
+  // These methods split [fetchAndApplyKbcPatch]'s "check + download +
+  // apply" into the three pieces customers actually want to drive
+  // independently:
+  //
+  //   1. [checkForKbcUpdate]   → is there a patch?
+  //   2. [downloadKbcUpdate]   → bring the bytes down (optional UX
+  //                              gating, progress reporting)
+  //   3. [tryApplyStagedKbcPatch] (existing) → apply on next boot
+  //
+  // Plus [readCurrentKbcPatch] which exposes the active patch's
+  // metadata so the host can render "You are on v1.2.0-patch.3".
+  //
+  // The all-in-one [fetchAndApplyKbcPatch] still exists for hosts that
+  // want one call; the split API is for hosts that need an "Update?"
+  // dialog, a progress bar, or both.
+
+  /// Probe the server for a new patch WITHOUT downloading. The result
+  /// carries the patch label, size, sha256, signed download URL, and
+  /// [SankofaUpdate.isMandatory] flag — enough to drive a confirmation
+  /// dialog. Hosts then call [downloadKbcUpdate] when ready.
+  ///
+  /// ```dart
+  /// final result = await Sankofa.instance.deploy?.checkForKbcUpdate(
+  ///   endpoint:      'https://api.sankofa.dev',
+  ///   apiKey:        'sk_live_…',
+  ///   appVersion:    '1.2.0',
+  ///   engineVersion: '3.44.0+sankofa-1',
+  ///   distinctId:    await getOrCreateDistinctId(),
+  /// );
+  /// if (result?.hasUpdate == true) {
+  ///   if (result!.update!.isMandatory) {
+  ///     await Sankofa.instance.deploy?.downloadKbcUpdate(result.update!);
+  ///   } else {
+  ///     final yes = await showUpdateDialog(context, result.update!);
+  ///     if (yes) await Sankofa.instance.deploy?.downloadKbcUpdate(result.update!);
+  ///   }
+  /// }
+  /// ```
+  ///
+  /// Locally-banned labels (previously auto-rolled-back on this
+  /// device) are filtered automatically — the result's `status` is
+  /// [SankofaUpdateStatus.bannedLocally] in that case.
+  Future<SankofaUpdateCheckResult> checkForKbcUpdate({
+    String? endpoint,
+    String? apiKey,
+    String? appVersion,
+    String? engineVersion,
+    String? distinctId,
+    String? platform,
+    String? currentLabel,
+    Duration timeout = const Duration(seconds: 30),
+  }) async {
+    final banned = await getBannedKbcLabels();
+    return kbc_fetch.checkForKbcUpdate(
+      endpoint: _resolveEndpoint(endpoint),
+      apiKey: _resolveApiKey(apiKey),
+      appVersion: _resolveAppVersion(appVersion),
+      engineVersion: _resolveEngineVersion(engineVersion),
+      distinctId: _resolveDistinctId(distinctId),
+      platform: platform ?? _effectivePlatform,
+      currentLabel: currentLabel,
+      timeout: timeout,
+      bannedLabels: banned.isEmpty ? null : banned,
+    );
+  }
+
+  /// Download the envelope discovered by [checkForKbcUpdate] and stage
+  /// it on disk for [tryApplyStagedKbcPatch] to pick up on the next
+  /// launch. Streams the response so [onProgress] fires on every
+  /// chunk with the running `(received, total)` bytes — drives a
+  /// progress bar without buffering the whole envelope in memory.
+  ///
+  /// The streamed bytes are verified against [SankofaUpdate.sha256]
+  /// before the file is moved into place; a corrupt download deletes
+  /// the partial file and throws [KbcFetchException].
+  ///
+  /// Returns the absolute on-disk path of the staged envelope. Hosts
+  /// rarely need this — kept for debugging and tests.
+  ///
+  /// Telemetry: emits `kbc_patch_downloaded` on success and
+  /// `kbc_apply_failed{phase=download}` on transport / SHA failures.
+  Future<String> downloadKbcUpdate(
+    SankofaUpdate update, {
+    void Function(int received, int total)? onProgress,
+    Duration timeout = const Duration(minutes: 5),
+  }) async {
+    _assertReady();
+    try {
+      final path = await kbc_fetch.downloadKbcUpdateToFile(
+        update,
+        onProgress: onProgress,
+        timeout: timeout,
+      );
+      _reportKbcEvent(
+        eventType: 'kbc_patch_downloaded',
+        bundleLabel: update.label,
+        releaseId: update.releaseId,
+        extra: {'size_bytes': update.sizeBytes, 'staged_path': path},
+      );
+      return path;
+    } catch (err, st) {
+      final stack = _formatKbcStackTrace(st);
+      _reportKbcEvent(
+        eventType: 'kbc_apply_failed',
+        bundleLabel: update.label,
+        releaseId: update.releaseId,
+        errorMessage: err.toString(),
+        extra: {
+          'phase': 'download',
+          'cause_class': err.runtimeType.toString(),
+          if (stack != null) 'stack_trace': stack,
+        },
+      );
+      rethrow;
+    }
+  }
+
+  /// Returns metadata for the patch currently believed to be live on
+  /// this device. The SDK reads the `last_good/patch.skdp` envelope
+  /// — the patch that survived a `notifyKbcPatchReady` confirmation
+  /// — and surfaces its label.
+  ///
+  /// Returns null when no patch has ever been promoted (the app is
+  /// running its baseline AOT code).
+  ///
+  /// ```dart
+  /// final current = await Sankofa.instance.deploy?.readCurrentKbcPatch();
+  /// setState(() => _patchLabel = current?.label ?? 'baseline');
+  /// ```
+  Future<SankofaCurrentPatch?> readCurrentKbcPatch() async {
+    final path = await _kbcSlotPath(_kbcSlotLastGood);
+    final file = File(path);
+    if (!file.existsSync()) return null;
+    try {
+      final bytes = await file.readAsBytes();
+      final env = parseKbcEnvelope(bytes);
+      final label = env.metadata['label']?.toString();
+      if (label == null || label.isEmpty) return null;
+      final releaseId = env.metadata['release_id']?.toString();
+      final stamped = env.metadata['issued_at_unix_ms'];
+      DateTime? appliedAt;
+      if (stamped is num) {
+        appliedAt = DateTime.fromMillisecondsSinceEpoch(stamped.toInt());
+      }
+      return SankofaCurrentPatch(
+        label: label,
+        releaseId: releaseId,
+        appliedAt: appliedAt,
+      );
+    } catch (e) {
+      if (kDebugMode) {
+        debugPrint('[Sankofa.deploy] readCurrentKbcPatch: $e');
+      }
+      return null;
+    }
   }
 
   // ── Rollback safety (RN-style time-window) ──────────────────────────

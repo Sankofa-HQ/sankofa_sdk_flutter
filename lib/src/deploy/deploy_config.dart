@@ -35,11 +35,54 @@ class SankofaDeployOptions {
   /// so the SDK has no extra round-trip on cold start.
   final String? signingPubkeyB64;
 
+  /// Sankofa-engine identity this app was built against
+  /// (e.g. `3.44.0+sankofa-1`). Used as the default `engineVersion`
+  /// passed to `/api/deploy/check` whenever the host calls
+  /// `Sankofa.deploy.checkForKbcUpdate()` / `downloadKbcUpdate` /
+  /// `fetchAndApplyKbcPatch` without an explicit override.
+  ///
+  /// When null, those calls require the host to pass `engineVersion:`
+  /// explicitly. The recommended pattern is to set it once here at
+  /// init time and forget about it for every subsequent call.
+  ///
+  /// [SankofaBootstrap.run] auto-fills this from `sankofa.yaml`'s
+  /// `engine_version` field if the field isn't already set.
+  final String? engineVersion;
+
+  /// Default platform string sent to `/api/deploy/check` when the host
+  /// doesn't override it. When null, the SDK derives it from
+  /// `Platform.isIOS` / `Platform.isAndroid` at call time. Override
+  /// only when running on an exotic host the SDK can't detect (e.g.
+  /// integration tests with a faked Platform).
+  final String? platformOverride;
+
   const SankofaDeployOptions({
     this.appReadyTimeout = const Duration(seconds: 10),
     this.autoCheckOnStartup = true,
     this.signingPubkeyB64,
+    this.engineVersion,
+    this.platformOverride,
   });
+
+  /// Returns a copy with [engineVersion] overridden — used by
+  /// [SankofaBootstrap.run] to bind the engine version read from
+  /// `sankofa.yaml` without making the host re-construct the options
+  /// object themselves.
+  SankofaDeployOptions copyWith({
+    Duration? appReadyTimeout,
+    bool? autoCheckOnStartup,
+    String? signingPubkeyB64,
+    String? engineVersion,
+    String? platformOverride,
+  }) {
+    return SankofaDeployOptions(
+      appReadyTimeout: appReadyTimeout ?? this.appReadyTimeout,
+      autoCheckOnStartup: autoCheckOnStartup ?? this.autoCheckOnStartup,
+      signingPubkeyB64: signingPubkeyB64 ?? this.signingPubkeyB64,
+      engineVersion: engineVersion ?? this.engineVersion,
+      platformOverride: platformOverride ?? this.platformOverride,
+    );
+  }
 
   /// Serialized form sent over the platform channel to the Kotlin/Swift
   /// side. Keys mirror the receiving `SankofaDeployPlugin.kt` parameter
