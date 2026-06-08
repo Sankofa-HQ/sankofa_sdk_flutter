@@ -377,31 +377,31 @@ class SankofaDeploy implements SankofaModule {
 
     if (options.autoCheckOnStartup && deploy._ready) {
       // Fire-and-forget. Errors flow into the platform's logger and
-      // the next checkForUpdate() call will surface the state.
-      // Skip on iOS Path C (where _ready stays false) because
-      // checkForUpdate hits the libapp.so binary-diff endpoint, not
-      // the KBC pipeline — wrong path for iOS Path C apps.
-      unawaited(deploy.checkForUpdate());
+      // the next checkForUpdate() call will surface the state. Skip
+      // on iOS where _ready stays false because the legacy libapp.so
+      // path is Android-only.
+      // ignore: deprecated_member_use_from_same_package
+      unawaited(deploy.legacyAndroidCheckForUpdate());
     }
     return deploy;
   }
 
-  /// Check the server for a new patch. The result reflects what the
-  /// updater did — `installed` means a patch was staged for the next
-  /// boot; `upToDate` means nothing changed; `rolledBack` means we
-  /// detected a prior boot-loop and reverted.
-  Future<UpdateStatus> checkForUpdate() {
+  /// Legacy Android-only libapp.so binary-diff check. Calls into the
+  /// native plugin and stages a binary-diff patch on next boot. Most
+  /// hosts should use the cross-platform [checkForUpdate] (no args,
+  /// works on iOS + Android) instead — kept exposed only because the
+  /// auto-startup hook still calls it on Android. Will become fully
+  /// internal once the libapp.so path is sunset in favour of β.3 KBC.
+  @Deprecated('Use checkForUpdate() — cross-platform, no args needed.')
+  Future<UpdateStatus> legacyAndroidCheckForUpdate() {
     _assertReady();
     return SankofaDeployPlatform.instance.checkForUpdate();
   }
 
-  /// Signals that the app has reached a stable state. Must be called
-  /// AFTER `runApp()` returns and the first frame has rendered —
-  /// typically right after the first user-visible widget is on screen.
-  ///
-  /// Resets the boot-counter rollback timer. Skipping this call after
-  /// a patch is staged will trigger a rollback on the next launch.
-  Future<void> notifyAppReady() {
+  /// Legacy Android-only "app ready" hook for the libapp.so path. Most
+  /// hosts should use [notifyAppReady] (cross-platform) instead.
+  @Deprecated('Use notifyAppReady() — cross-platform, manages both libapp.so + KBC paths.')
+  Future<void> legacyAndroidNotifyAppReady() {
     _assertReady();
     return SankofaDeployPlatform.instance.notifyAppReady();
   }
@@ -620,12 +620,12 @@ class SankofaDeploy implements SankofaModule {
   // apply" into the three pieces customers actually want to drive
   // independently:
   //
-  //   1. [checkForKbcUpdate]   → is there a patch?
+  //   1. [checkForUpdate]   → is there a patch?
   //   2. [downloadKbcUpdate]   → bring the bytes down (optional UX
   //                              gating, progress reporting)
   //   3. [tryApplyStagedKbcPatch] (existing) → apply on next boot
   //
-  // Plus [readCurrentKbcPatch] which exposes the active patch's
+  // Plus [readCurrentPatch] which exposes the active patch's
   // metadata so the host can render "You are on v1.2.0-patch.3".
   //
   // The all-in-one [fetchAndApplyKbcPatch] still exists for hosts that
@@ -638,7 +638,7 @@ class SankofaDeploy implements SankofaModule {
   /// dialog. Hosts then call [downloadKbcUpdate] when ready.
   ///
   /// ```dart
-  /// final result = await Sankofa.instance.deploy?.checkForKbcUpdate(
+  /// final result = await Sankofa.instance.deploy?.checkForUpdate(
   ///   endpoint:      'https://api.sankofa.dev',
   ///   apiKey:        'sk_live_…',
   ///   appVersion:    '1.2.0',
@@ -647,10 +647,10 @@ class SankofaDeploy implements SankofaModule {
   /// );
   /// if (result?.hasUpdate == true) {
   ///   if (result!.update!.isMandatory) {
-  ///     await Sankofa.instance.deploy?.downloadKbcUpdate(result.update!);
+  ///     await Sankofa.instance.deploy?.downloadUpdate(result.update!);
   ///   } else {
   ///     final yes = await showUpdateDialog(context, result.update!);
-  ///     if (yes) await Sankofa.instance.deploy?.downloadKbcUpdate(result.update!);
+  ///     if (yes) await Sankofa.instance.deploy?.downloadUpdate(result.update!);
   ///   }
   /// }
   /// ```
@@ -658,7 +658,7 @@ class SankofaDeploy implements SankofaModule {
   /// Locally-banned labels (previously auto-rolled-back on this
   /// device) are filtered automatically — the result's `status` is
   /// [SankofaUpdateStatus.bannedLocally] in that case.
-  Future<SankofaUpdateCheckResult> checkForKbcUpdate({
+  Future<SankofaUpdateCheckResult> checkForUpdate({
     String? endpoint,
     String? apiKey,
     String? appVersion,
@@ -682,7 +682,7 @@ class SankofaDeploy implements SankofaModule {
     );
   }
 
-  /// Download the envelope discovered by [checkForKbcUpdate] and stage
+  /// Download the envelope discovered by [checkForUpdate] and stage
   /// it on disk for [tryApplyStagedKbcPatch] to pick up on the next
   /// launch. Streams the response so [onProgress] fires on every
   /// chunk with the running `(received, total)` bytes — drives a
@@ -697,7 +697,7 @@ class SankofaDeploy implements SankofaModule {
   ///
   /// Telemetry: emits `kbc_patch_downloaded` on success and
   /// `kbc_apply_failed{phase=download}` on transport / SHA failures.
-  Future<String> downloadKbcUpdate(
+  Future<String> downloadUpdate(
     SankofaUpdate update, {
     void Function(int received, int total)? onProgress,
     Duration timeout = const Duration(minutes: 5),
@@ -742,10 +742,10 @@ class SankofaDeploy implements SankofaModule {
   /// running its baseline AOT code).
   ///
   /// ```dart
-  /// final current = await Sankofa.instance.deploy?.readCurrentKbcPatch();
+  /// final current = await Sankofa.instance.deploy?.readCurrentPatch();
   /// setState(() => _patchLabel = current?.label ?? 'baseline');
   /// ```
-  Future<SankofaCurrentPatch?> readCurrentKbcPatch() async {
+  Future<SankofaCurrentPatch?> readCurrentPatch() async {
     final path = await _kbcSlotPath(_kbcSlotLastGood);
     final file = File(path);
     if (!file.existsSync()) return null;
@@ -767,7 +767,7 @@ class SankofaDeploy implements SankofaModule {
       );
     } catch (e) {
       if (kDebugMode) {
-        debugPrint('[Sankofa.deploy] readCurrentKbcPatch: $e');
+        debugPrint('[Sankofa.deploy] readCurrentPatch: $e');
       }
       return null;
     }

@@ -45,6 +45,27 @@ dependencies:
   # apps; declaring it here makes the SDK self-contained.
   path_provider: ^2.1.0
 
+  # `dynamic_modules` is the Sankofa-fork Dart SDK's binding to
+  # `dart:_internal.loadDynamicModule` — the VM entry point we use to
+  # bring a downloaded patch into the running isolate.
+  #
+  # Customers add `sankofa_flutter: ^X.Y.Z` only. The standalone
+  # trampoline at `sankofa-dart-sdk/standalone/dynamic_modules/` (a
+  # clean copy with no monorepo path deps) is pulled in transitively
+  # via this git ref, so the customer's `main()` is just:
+  #
+  #     await SankofaUpdater.preFlight();
+  #
+  # No `dynamic_modules` import, no `registerLoader` — sankofa_flutter
+  # imports it internally on the customer's behalf.
+  # NOTE: temporarily switched to a path dep while the standalone
+  # trampoline is staged for push. Will flip back to a `git:` ref
+  # pointing at `Sankofa-HQ/sankofa-dart-sdk/standalone/dynamic_modules`
+  # once the user pushes the new dir, so pub.dev consumers resolve
+  # transitively without a local checkout.
+  dynamic_modules:
+    path: ../../flutter-deploy/sankofa-dart-sdk/standalone/dynamic_modules
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

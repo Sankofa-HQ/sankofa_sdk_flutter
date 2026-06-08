@@ -152,6 +152,9 @@ class SankofaBootstrap {
     final appId = config['app_id']?.trim() ?? _kFallbackAppId;
     final endpoint = config['base_url']?.trim() ?? options.fallbackEndpoint;
     final engineVersion = config['engine_version']?.trim() ?? '';
+    // signing_pubkey is written by `sankofa keys generate` and never
+    // edited by hand — customer doesn't need to know it exists.
+    final signingPubkey = config['signing_pubkey']?.trim();
 
     if (apiKey.isEmpty && kDebugMode) {
       debugPrint(
@@ -164,16 +167,24 @@ class SankofaBootstrap {
     // Auto-enable Deploy when a loader was provided.
     final enableDeploy = options.enableDeploy ?? (options.loader != null);
 
-    // If sankofa.yaml carried an engine_version and the host's
-    // deployOptions didn't already set one, forward it as the default
-    // so `Sankofa.deploy.checkForKbcUpdate()` doesn't require the host
-    // to repeat the engine identity on every call.
+    // If sankofa.yaml carried an engine_version + signing_pubkey, forward
+    // them as deploy defaults so customer code never has to repeat
+    // engine identity / signing keys on every call. Both fields are
+    // written by the Sankofa CLI (`sankofa init` / `sankofa keys
+    // generate`) — customers do not edit them by hand.
     SankofaDeployOptions effectiveDeployOptions = options.deployOptions;
     if (engineVersion.isNotEmpty &&
         (effectiveDeployOptions.engineVersion == null ||
             effectiveDeployOptions.engineVersion!.isEmpty)) {
       effectiveDeployOptions =
           effectiveDeployOptions.copyWith(engineVersion: engineVersion);
+    }
+    if (signingPubkey != null &&
+        signingPubkey.isNotEmpty &&
+        (effectiveDeployOptions.signingPubkeyB64 == null ||
+            effectiveDeployOptions.signingPubkeyB64!.isEmpty)) {
+      effectiveDeployOptions =
+          effectiveDeployOptions.copyWith(signingPubkeyB64: signingPubkey);
     }
 
     await Sankofa.instance.init(

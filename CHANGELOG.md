@@ -1,57 +1,66 @@
 # Changelog
 
-## 0.2.1 — Shorebird-style developer API + customer-blocking fixes
+## 0.2.1 — `SankofaUpdater` (Shorebird-compatible) + customer-blocking fixes
 
-**New: Shorebird-compatible update API** for hosts that want to drive
-their own "Update available?" UX. All arguments are optional —
-defaults fall through to whatever the host passed to
-`Sankofa.instance.init(enableDeploy: true)`:
+**New: `SankofaUpdater` — the one class.** Mirrors Shorebird's
+`ShorebirdUpdater` exactly so apps migrating off Shorebird only swap
+class names. Zero constructor args. No engine versions, signing keys,
+or "KBC" anywhere in customer code — those live in `sankofa.yaml`,
+written by the CLI:
 
-```dart
-// Initialize once at app start (boilerplate-free; deploy inherits
-// apiKey, endpoint, appVersion, distinctId, and engineVersion from
-// here).
-await Sankofa.instance.init(
-  apiKey: 'sk_live_…',
-  appVersion: '1.2.0',
-  enableDeploy: true,
-  deployOptions: const SankofaDeployOptions(
-    engineVersion: '3.44.0+sankofa-1',
-    signingPubkeyB64: '…',
-  ),
-);
-
-// Later, anywhere in the app:
-final result = await Sankofa.instance.deploy?.checkForKbcUpdate();
-if (result?.hasUpdate == true) {
-  final update = result!.update!;
-  if (update.isMandatory) {
-    await Sankofa.instance.deploy?.downloadKbcUpdate(update);
-  } else {
-    final yes = await showUpdateDialog(context, update);
-    if (yes) {
-      await Sankofa.instance.deploy?.downloadKbcUpdate(
-        update,
-        onProgress: (rx, total) => setState(() => _progress = rx / total),
-      );
-    }
-  }
-}
-
-final current = await Sankofa.instance.deploy?.readCurrentKbcPatch();
-print('Currently on ${current?.label ?? "baseline"}');
+```yaml
+# sankofa.yaml (project root; add to flutter.assets in pubspec.yaml)
+app_id: proj_xxxxxxxxxxxxx
+api_key: sk_live_xxxxxxxxxxxxxxxx
 ```
 
-If you use `Sankofa.bootstrap` (recommended), the `engine_version` is
-also auto-read from `sankofa.yaml` — your call drops to literally
-`Sankofa.instance.deploy?.checkForKbcUpdate()`.
+```dart
+// main.dart — full Sankofa Deploy integration:
+import 'package:sankofa_flutter/sankofa_flutter.dart';
 
-New types exported from `package:sankofa_flutter/sankofa_flutter.dart`:
-`SankofaUpdate`, `SankofaCurrentPatch`, `SankofaUpdateCheckResult`,
-`SankofaUpdateStatus`. The all-in-one `fetchAndApplyKbcPatch` still
-exists for hosts that don't need split control.
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await SankofaUpdater.preFlight();
+  runApp(const MyApp());
+}
+```
 
+That's everything. No `dynamic_modules` import, no `loadModuleFromBytes`,
+no signing-key registration. The SDK pulls everything in transitively
+and reads `sankofa.yaml` on first use.
 
+```dart
+// Anywhere in the app:
+final updater = SankofaUpdater();
+
+// Currently-installed patch (Shorebird parity).
+final current = await updater.readCurrentPatch();
+
+// Is a new patch available?
+final result = await updater.checkForUpdate();
+if (result.hasUpdate) {
+  if (result.update!.isMandatory) {
+    await updater.downloadUpdate(result.update!);
+  } else if (await showUpdateDialog(context)) {
+    await updater.downloadUpdate(
+      result.update!,
+      onProgress: (rx, total) =>
+          setState(() => _progress = total > 0 ? rx / total : 0),
+    );
+  }
+}
+```
+
+**Customer-facing surface stops there.** Engine versions, KBC
+bytecode, Ed25519 signing keys — none appear in customer code. They
+live in `sankofa.yaml` (written by `sankofa init` / `sankofa keys
+generate`) and the SDK reads them transparently.
+
+The previous Kbc-named methods on `Sankofa.deploy` (`checkForKbcUpdate`,
+`downloadKbcUpdate`, `readCurrentKbcPatch`) were renamed to drop the
+prefix (`checkForUpdate`, `downloadUpdate`, `readCurrentPatch`). The
+all-in-one `fetchAndApplyKbcPatch` still exists for hosts that want
+one call.
 
 **Customer-blocking release crash fix:** the heatmap snapshotter and
 the replay recorder both called `RenderObject.debugNeedsPaint`, which
@@ -75,8 +84,7 @@ correctly. **Every iOS-consuming customer on 0.2.0 must bump to 0.2.1.**
     live widget tree during capture. The flag-driven render branch
     caused inconsistent flicker on every screenshot because Flutter's
     pipeline doesn't repaint on global flag flips. Masking still
-    happens off-screen on the rasterized bitmap (the recorder's
-    `_applyMasks` path is the authoritative one). Result: masked
+    happens off-screen on the rasterized bitmap. Result: masked
     regions in the upload are still black; the live UI no longer
     flickers.
 *   **External texture invalidation on Android Impeller** — the
@@ -109,53 +117,3 @@ correctly. **Every iOS-consuming customer on 0.2.0 must bump to 0.2.1.**
     signingPubkeyB64` opt-in; SDK refuses unsigned or non-verifying
     envelopes when set. Handshake-distributed pubkeys merge with
     the host-embedded key for graceful rotation.
-*   **Telemetry** — `kbc_apply_success` / `_failed`,
-    `kbc_boot_apply_success` / `_failed` / `_skipped_rollback`
-    fire on every apply path with error-message + cause-class
-    context for dashboard rollups.
-*   **`Sankofa.deploy.getStagedKbcPatchInfo`** — read-only view
-    of the active patch (label, dartVersion, engineCommit, signed
-    flag, size, modifiedAt) for debug screens.
-
-### Hardening (data integrity, privacy, crash durability, robustness)
-
-*   **Pulse auto-show** — surveys flagged `auto_show` in the dashboard
-    now present automatically (parity with iOS/Android). New
-    `SankofaPulse.setNavigatorKey(GlobalKey<NavigatorState>)` gives the
-    pump a presentation anchor; honours per-survey cooldown + delay and
-    re-evaluates on app foreground / after each fetch. Screen/URL
-    targeting now works (the eligibility context populates the current
-    screen). `refreshSurveys()` forces a fresh fetch after `identify()`.
-*   **Analytics queue** — per-status delivery disposition (transient
-    failures retry, client errors drop) instead of all-or-nothing,
-    plus a hard size cap + 48h TTL and single-flight flush. Custom
-    property numbers/booleans keep their native JSON type.
-*   **Session replay privacy** — automatic masking of text inputs
-    (always for obscured fields), `SankofaMask` regions, and optional
-    text/images; the server `mask_all_inputs` flag is now enforced.
-    Bounded frame/event buffers, no data loss on failed uploads,
-    serialized uploads.
-*   **Crash durability** — fatal crashes are spooled synchronously and
-    recovered (with full payload) + flushed on the next launch; fatals
-    are never sampled out; `PlatformDispatcher.onError` preserves the
-    host's default error propagation.
-*   **Lifecycle** — correct cold-start session rotation, `paused`/
-    `hidden`-only backgrounding, race-free init, and `reset()` re-points
-    replay to the new anonymous id.
-*   **Config/Switch** — `config.get<bool>` coerces 1/0 and
-    "true"/"false"; change listeners deliver a consistent snapshot.
-
-## 0.1.0
-
-*   Added high-fidelity session replay mode.
-*   Implemented remote configuration fetching for dynamic sampling.
-*   Added event-based high-fidelity recording triggers.
-*   Updated dependency management for cleaner integration.
-
-## 0.0.1
-
-* Initial release of Sankofa Flutter SDK.
-* Modular architecture for easier maintenance.
-* Support for event tracking, identity management, and session replay (wireframe & screenshot modes).
-* Automatic UTM parameter capturing from deep links.
-* App lifecycle observation for automatic event tracking and queue flushing.

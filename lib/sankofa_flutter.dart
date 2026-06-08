@@ -39,6 +39,10 @@ export 'src/deploy/sankofa_update.dart'
         SankofaCurrentPatch,
         SankofaUpdateCheckResult,
         SankofaUpdateStatus;
+// SankofaUpdater — the one class most apps use for OTA. Zero-config:
+// reads sankofa.yaml at first call. No engine_version, signing_pubkey,
+// or `init` arguments to think about.
+export 'src/deploy/sankofa_updater.dart' show SankofaUpdater;
 // β.3 + ε + β.4 + η — Sankofa Deploy: Flutter Code KBC patch apply API (iOS Path C).
 export 'src/deploy/kbc_envelope.dart'
     show
