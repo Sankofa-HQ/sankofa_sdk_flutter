@@ -14,20 +14,42 @@ app_id: proj_xxxxxxxxxxxxx
 api_key: sk_live_xxxxxxxxxxxxxxxx
 ```
 
+```yaml
+# pubspec.yaml — two deps
+dependencies:
+  sankofa_flutter: ^0.2.1
+  dynamic_modules:
+    git:
+      url: https://github.com/Sankofa-HQ/sankofa-dart-sdk.git
+      path: standalone/dynamic_modules
+      ref: main
+flutter:
+  assets:
+    - sankofa.yaml
+```
+
 ```dart
 // main.dart — full Sankofa Deploy integration:
+import 'package:dynamic_modules/dynamic_modules.dart';
 import 'package:sankofa_flutter/sankofa_flutter.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  SankofaUpdater.registerLoader(loadModuleFromBytes);   // one-time
   await SankofaUpdater.preFlight();
   runApp(const MyApp());
 }
 ```
 
-That's everything. No `dynamic_modules` import, no `loadModuleFromBytes`,
-no signing-key registration. The SDK pulls everything in transitively
-and reads `sankofa.yaml` on first use.
+Don't write any of this by hand — run `sankofa init` (in a Flutter
+project) and the CLI writes the pubspec stanzas + sankofa.yaml +
+modifies lib/main.dart for you.
+
+> **Why `dynamic_modules` is a separate customer dep:** the underlying
+> binding imports `dart:_internal`, which pub.dev refuses to publish.
+> The package lives in a separate repo; you reference it via git.
+> A future release will move the binding into our bundled Flutter SDK
+> as a `sdk: flutter` package so this dep drops out entirely.
 
 ```dart
 // Anywhere in the app:

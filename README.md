@@ -238,25 +238,42 @@ carve-out via the Sankofa-forked Flutter engine's bytecode interpreter.
    app_id: proj_xxxxxxxxxxxxx
    api_key: sk_live_xxxxxxxxxxxxxxxx
    ```
-2. Add it to `pubspec.yaml`'s assets:
+2. Add it to `pubspec.yaml`'s assets + add the VM-binding dep (see callout below):
    ```yaml
+   dependencies:
+     sankofa_flutter: ^0.2.1
+     dynamic_modules:
+       git:
+         url: https://github.com/Sankofa-HQ/sankofa-dart-sdk.git
+         path: standalone/dynamic_modules
+         ref: main
    flutter:
      assets:
        - sankofa.yaml
    ```
-3. Apply any patch the previous run staged, right before `runApp()`:
+3. Register the loader + apply staged patch in `main()` (before `runApp`):
    ```dart
+   import 'package:dynamic_modules/dynamic_modules.dart';
+   import 'package:sankofa_flutter/sankofa_flutter.dart';
+
    void main() async {
      WidgetsFlutterBinding.ensureInitialized();
+     SankofaUpdater.registerLoader(loadModuleFromBytes);
      await SankofaUpdater.preFlight();
      runApp(const MyApp());
    }
    ```
 
-That's the entire setup. The SDK reads `sankofa.yaml` on first call.
-You do not import any helper packages or register signing keys —
-those live inside `sankofa.yaml` (written by the CLI when you run
-`sankofa keys generate`) and the SDK reads them transparently.
+After `registerLoader`, every other API call is loader-free. Engine
+version + signing keys live in `sankofa.yaml` (written by the CLI when
+you run `sankofa keys generate`); customer code never touches them.
+
+> **Why `dynamic_modules` is a separate dep:** the underlying VM binding
+> (`loadModuleFromBytes`) imports `dart:_internal`, which pub.dev
+> refuses to publish. The package lives in a separate repo; you
+> reference it via git. A future release will move the binding into our
+> bundled Flutter SDK so the dep drops out — for now it's one extra
+> pubspec stanza.
 
 **Check + download from anywhere in your app:**
 

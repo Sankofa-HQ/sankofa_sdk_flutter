@@ -1,9 +1,9 @@
-import 'package:dynamic_modules/dynamic_modules.dart' show loadModuleFromBytes;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 import '../sankofa_bootstrap.dart';
 import '../sankofa_client.dart';
+import 'kbc_loader.dart' show KbcLoaderFn;
 import 'sankofa_update.dart';
 
 /// **The one class you call.** Mirrors Shorebird's `ShorebirdUpdater`
@@ -86,34 +86,49 @@ class SankofaUpdater {
   SankofaUpdater();
 
   static bool _preFlightDone = false;
+  static KbcLoaderFn? _registeredLoader;
+
+  /// Register the dynamic-module loader once at app startup. Pub.dev
+  /// blocks any package that imports `dart:_internal`, so the binding
+  /// (`loadModuleFromBytes` from `package:dynamic_modules`) lives in
+  /// the customer's pubspec rather than as a transitive dep of
+  /// `sankofa_flutter`. Customer code touches `dynamic_modules` in
+  /// exactly one place — the call below.
+  ///
+  /// ```dart
+  /// import 'package:dynamic_modules/dynamic_modules.dart';
+  /// import 'package:sankofa_flutter/sankofa_flutter.dart';
+  ///
+  /// void main() async {
+  ///   WidgetsFlutterBinding.ensureInitialized();
+  ///   SankofaUpdater.registerLoader(loadModuleFromBytes);
+  ///   await SankofaUpdater.preFlight();
+  ///   runApp(const MyApp());
+  /// }
+  /// ```
+  ///
+  /// After registration the rest of `SankofaUpdater`'s API is
+  /// loader-free.
+  static void registerLoader(KbcLoaderFn loader) {
+    _registeredLoader = loader;
+  }
 
   /// Call once from `main()` before `runApp()`. Reads `sankofa.yaml`,
   /// applies any patch the previous run staged, and schedules the
   /// "app rendered successfully" health confirmation after the first
   /// frame paints.
   ///
-  /// **Zero args.** The SDK pulls the VM bytecode loader (`loadModule
-  /// FromBytes`) from `package:dynamic_modules`, which is a transitive
-  /// dep of `sankofa_flutter` — customer code never imports it.
+  /// Requires a prior call to [registerLoader] — see that method's
+  /// docs for the canonical `main()` pattern.
   ///
   /// Safe to call multiple times — subsequent calls are no-ops after
   /// the first.
-  ///
-  /// ```dart
-  /// import 'package:sankofa_flutter/sankofa_flutter.dart';
-  ///
-  /// void main() async {
-  ///   WidgetsFlutterBinding.ensureInitialized();
-  ///   await SankofaUpdater.preFlight();
-  ///   runApp(const MyApp());
-  /// }
-  /// ```
   static Future<void> preFlight() async {
     if (_preFlightDone) return;
     _preFlightDone = true;
 
     await SankofaBootstrap.run(
-      options: const SankofaBootstrapOptions(loader: loadModuleFromBytes),
+      options: SankofaBootstrapOptions(loader: _registeredLoader),
     );
   }
 
@@ -186,7 +201,7 @@ class SankofaUpdater {
     if (Sankofa.instance.deploy != null) return;
     try {
       await SankofaBootstrap.run(
-        options: const SankofaBootstrapOptions(loader: loadModuleFromBytes),
+        options: SankofaBootstrapOptions(loader: _registeredLoader),
       );
     } catch (e) {
       if (kDebugMode) {

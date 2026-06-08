@@ -58,13 +58,13 @@ dependencies:
   #
   # No `dynamic_modules` import, no `registerLoader` — sankofa_flutter
   # imports it internally on the customer's behalf.
-  # NOTE: temporarily switched to a path dep while the standalone
-  # trampoline is staged for push. Will flip back to a `git:` ref
-  # pointing at `Sankofa-HQ/sankofa-dart-sdk/standalone/dynamic_modules`
-  # once the user pushes the new dir, so pub.dev consumers resolve
-  # transitively without a local checkout.
-  dynamic_modules:
-    path: ../../flutter-deploy/sankofa-dart-sdk/standalone/dynamic_modules
+  # NOTE: `dynamic_modules` is NOT a dependency. Pub.dev refuses git
+  # and path deps in published packages, and the underlying binding
+  # imports `dart:_internal` which can't be published as a hosted
+  # package. We vendored the 5-line wrapper into
+  # `lib/src/deploy/_dynamic_modules.dart` instead. Customer code
+  # never imports `dynamic_modules` — `SankofaUpdater.preFlight()`
+  # picks the vendored binding up internally.
 
 dev_dependencies:
   flutter_test:
