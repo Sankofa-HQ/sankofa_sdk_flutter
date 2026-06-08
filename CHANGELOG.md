@@ -1,12 +1,12 @@
 # Changelog
 
-## 0.2.1 — `SankofaUpdater` (Shorebird-compatible) + customer-blocking fixes
+## 0.2.1 — `SankofaUpdater` + customer-blocking fixes
 
-**New: `SankofaUpdater` — the one class.** Mirrors Shorebird's
-`ShorebirdUpdater` exactly so apps migrating off Shorebird only swap
-class names. Zero constructor args. No engine versions, signing keys,
-or "KBC" anywhere in customer code — those live in `sankofa.yaml`,
-written by the CLI:
+**New: `SankofaUpdater` — the one class.** A clean facade for OTA
+updates that lives behind a zero-arg constructor and lazy
+`sankofa.yaml` discovery. No engine versions, signing keys, or "KBC"
+anywhere in customer code — those live in `sankofa.yaml`, written by
+the CLI:
 
 ```yaml
 # sankofa.yaml (project root; add to flutter.assets in pubspec.yaml)
@@ -33,7 +33,7 @@ and reads `sankofa.yaml` on first use.
 // Anywhere in the app:
 final updater = SankofaUpdater();
 
-// Currently-installed patch (Shorebird parity).
+// Currently-installed patch.
 final current = await updater.readCurrentPatch();
 
 // Is a new patch available?

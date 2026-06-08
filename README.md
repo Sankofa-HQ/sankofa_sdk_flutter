@@ -1,110 +1,251 @@
-# Sankofa Flutter SDK
+# Sankofa Flutter SDK 🚀
 
 [![Pub Version](https://img.shields.io/pub/v/sankofa_flutter?logo=dart&logoColor=white)](https://pub.dev/packages/sankofa_flutter)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Sankofa](https://img.shields.io/badge/Made%20with-Sankofa-blueviolet)](https://sankofa.dev)
 
-The official Flutter SDK for [Sankofa](https://sankofa.dev) — **OTA updates** (the
-Shorebird-compatible replacement, App Store compliant), plus Analytics, Catch
-(crash + error tracking), Switch (feature flags), Config (remote config), Pulse
-(in-app surveys), and Session Replay. One pubspec dependency, one initialization
-call, all six products.
-
-```dart
-// Full integration — main.dart
-import 'package:sankofa_flutter/sankofa_flutter.dart';
-
-void main() async {
-  WidgetsFlutterBinding.ensureInitialized();
-  await SankofaUpdater.preFlight();   // apply staged OTA patch
-  runApp(const MyApp());
-}
-```
+The official Flutter SDK for [Sankofa](https://sankofa.dev) — seven products
+in one package: **Analytics, Catch, Switch, Config, Pulse, Replay, and
+Deploy** (App-Store-compliant Flutter OTA updates). Plus a standalone native
+crash bridge that captures iOS NSException + POSIX signals and Android
+JVM-uncaught + ANR with zero dependency on the iOS / Android SDKs.
 
 ---
 
-## Contents
+## ✨ Features
 
-- [Why Sankofa](#why-sankofa)
-- [Install](#install)
-- [Sankofa Deploy — OTA patches without App Store resubmission](#sankofa-deploy)
-- [Full SDK initialization](#full-sdk-initialization)
-- [Per-product usage](#per-product-usage)
-- [Session Replay](#session-replay)
-- [Troubleshooting](#troubleshooting)
-- [Architecture in one paragraph](#architecture-in-one-paragraph)
-- [License](#license)
-
----
-
-## Why Sankofa
-
-| | Sankofa | Shorebird | CodePush (RN-only) |
-|---|---|---|---|
-| Flutter OTA, iOS App Store compliant | ✅ | ✅ | ❌ |
-| Self-hostable backend | ✅ | ❌ | ❌ |
-| Includes analytics + crash + surveys + flags + replay | ✅ | ❌ | ❌ |
-| One package, one init call | ✅ | ✅ | ❌ |
-
-Sankofa Deploy ships under the same App Store guideline that Shorebird and
-CodePush use — Apple PLA § 3.3.2 carve-out for **interpreted code in a VM**.
-Patches are Dart kernel bytecode (KBC) executed via `dart::Interpreter::Run`
-inside the signed app. No JIT entitlement. No `PROT_EXEC` mmap. App Store
-approves with the same review notes Shorebird customers ship under (see
-[App Review notes template](https://github.com/Sankofa-HQ/sankofa-flutter-deploy/blob/main/docs/app-review-notes-template.md)).
+- **Analytics**: events, identify, peopleSet, deep-link attribution,
+  offline-first queueing.
+- **Catch (Crashlytics + Sentry merged)**: Dart-level errors via
+  `FlutterError.onError` / `PlatformDispatcher.onError` / isolate listeners —
+  plus iOS NSException + POSIX signals + main-queue stalls and Android
+  JVM-uncaught + ANR via the bundled Flutter plugin.
+- **Switch**: feature flags with bundled defaults + onChange listeners.
+- **Config**: remote-config with typed `get<T>` accessors.
+- **Pulse**: in-app surveys (NPS, CSAT, custom).
+- **Session Replay**: wireframe + screenshot modes, automatic input masking,
+  `SankofaMask` widget.
+- **Deploy**: Flutter OTA updates — fix bugs and tweak UI without a new App
+  Store / Play Store release. App Store compliant under Apple PLA § 3.3.2 and
+  Google Play DNA's interpreted-code carve-out.
 
 ---
 
-## Install
+## 🚀 Quick start
+
+### 1. Install
+Add the dependency to your `pubspec.yaml`:
 
 ```yaml
 dependencies:
   sankofa_flutter: ^0.2.1
-flutter:
-  uses-material-design: true
-  assets:
-    - sankofa.yaml   # config file, see Deploy section below
 ```
 
-`flutter pub get` and you're done. The SDK transitively pulls in everything it
-needs to load patches — you do not add `dynamic_modules` or any other helper
-package.
+### 2. Initialize
+**One call wires every product.** Analytics, Catch, Switch, Config, Pulse,
+Replay and Deploy all come up from a single `init()` — no per-product
+`new SankofaX()` boilerplate, no `register()` step. Each product is gated
+server-side via the handshake, so a flag you don't subscribe to is simply
+a no-op. Both Dart errors AND iOS/Android native crashes flow through
+`Sankofa.captureException`.
+
+```dart
+import 'package:sankofa_flutter/sankofa_flutter.dart';
+
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+
+  await Sankofa.instance.init(
+    apiKey: 'YOUR_PROJECT_API_KEY',
+    endpoint: 'https://api.sankofa.dev',
+    debug: true,
+
+    // ── Product switches (all default true except Deploy) ──
+    enableAnalytics: true, // events, screens, lifecycle, presence
+    enableCatch: true,     // errors + native crashes
+    enableFlags: true,     // Switch — feature flags
+    enableConfig: true,    // remote config
+    enablePulse: true,     // in-app surveys (auto-shows, no extra wiring)
+    enableDeploy: true,    // OTA updates
+
+    // ── Optional per-product config ──
+    catchEnvironment: 'production',
+    release: 'myapp@1.4.0',
+    flagDefaults: {'new_checkout': FlagDecision(value: false, reason: 'default')},
+    configDefaults: {'max_upload_mb': ItemDecision(value: 25, version: 1, reason: 'default')},
+    // Sentry-style hook to scrub PII / drop noise.
+    beforeSend: (event) {
+      if (event.message?.contains('setState called after dispose') ?? false) return null;
+      return event;
+    },
+  );
+
+  runApp(const MyApp());
+}
+```
+
+After `init()`, reach any product through the client:
+`Sankofa.instance.flags`, `.config`, `.pulse`, `.errors`, `.deploy`. The
+legacy `SankofaSwitch()` / `SankofaConfig()` / `SankofaPulse.instance.register()`
+constructors still work (and win if you call them before `init`), but
+they're no longer required.
+
+> **Turning a product off:** pass `enableFlags: false` (etc.) to skip
+> constructing it entirely. `enableAnalytics: false` ships a build that
+> sends **zero** analytics events while keeping Catch/Switch/Config/Pulse
+> live.
 
 ---
 
-## Sankofa Deploy
+## 🛠 Usage
 
-OTA updates for Flutter, App Store compliant, iOS + Android.
+### Analytics
 
-### Setup (one time, ~30 seconds)
+```dart
+// Events
+Sankofa.instance.track('completed_purchase', {
+  'item_name': 'Vintage Camera',
+  'price': 120.50,
+  'currency': 'USD',
+});
 
-1. **Get an API key**: sign up at [app.sankofa.dev](https://app.sankofa.dev),
-   create a project, copy the `sk_live_…` key from Settings → API Keys.
+// Identity
+Sankofa.instance.identify('user_99');
+Sankofa.instance.setPerson(
+  name: 'Jane Doe',
+  email: 'jane@example.com',
+  properties: {'membership': 'Gold'},
+);
+```
 
-2. **Create `sankofa.yaml`** in your project root:
+### Catch — error capture
 
+Once `init()` resolves, every helper below works from anywhere. No
+`SankofaCatch.instance` to thread through your widget tree.
+
+```dart
+// Capture a handled exception
+try {
+  await chargeCard(amount);
+} catch (err, stack) {
+  Sankofa.captureException(err, stack);
+}
+
+// Non-error event
+Sankofa.captureMessage('payment retry attempted');
+
+// Crashlytics-style breadcrumb log — rides on next capture, doesn't bill.
+Sankofa.log('checkout: applying coupon SUMMER25');
+
+// Ambient context
+Sankofa.setUser(CatchUserContext(id: 'u_42', email: 'ada@example.com'));
+Sankofa.setTag('flow', 'checkout');
+Sankofa.setExtra('cart_id', cart.id);
+
+// Sentry-style temporary scope — tags only on this capture.
+Sankofa.withScope((scope) {
+  scope.setTag('checkout_step', 'payment');
+  scope.setLevel(CatchLevel.warning);
+  Sankofa.captureException(err);
+});
+```
+
+### Session replay
+
+```dart
+MaterialApp(
+  navigatorObservers: [SankofaNavigatorObserver()],
+  home: const SankofaReplayBoundary(
+    child: MyHomePage(),
+  ),
+);
+
+// Hide sensitive UI from replays — replaced with solid black in the
+// upload, untouched in the live UI.
+SankofaMask(
+  child: TextField(controller: _passwordController, obscureText: true),
+);
+
+// Suppress capture for screens that host external textures (video,
+// maps, web views) — protects the surrounding scroll position + avoids
+// "Invalid external texture" log spam on Android.
+SankofaReplaySuppress(
+  child: BetterPlayer(controller: _videoController),
+);
+```
+
+### Switch — feature flags
+
+Auto-constructed by `init(enableFlags: true)`. Read from anywhere via
+`Sankofa.instance.flags`:
+
+```dart
+final flags = Sankofa.instance.flags!; // pass flagDefaults to init() for offline-first values
+
+if (flags.getFlag('new_checkout')) showNewCheckout();
+final variant = flags.getVariant('checkout_redesign', defaultValue: 'control');
+```
+
+### Config — remote config
+
+Auto-constructed by `init(enableConfig: true)`. Read via
+`Sankofa.instance.config`:
+
+```dart
+final config = Sankofa.instance.config!; // pass configDefaults to init() for offline-first values
+
+final maxUploads = config.get<int>('max_uploads_per_day', 25);
+```
+
+### Pulse — surveys
+
+Auto-registered by `init(enablePulse: true)` — no `register()` call needed.
+Surveys flagged **auto-show** in the dashboard appear on their own; Pulse
+discovers your app's navigator automatically, so there's **no navigator key
+to wire up**. Present one manually with:
+
+```dart
+await Sankofa.instance.pulse.show(context, surveyId: 'nps-2024');
+
+// React to lifecycle events
+Sankofa.instance.pulse.on(PulseEvent.surveyCompleted, (e) {
+  print('Survey ${e.surveyId} completed');
+});
+```
+
+**Targeting:** rules are AND-ed and evaluated on-device. For **Screen**
+rules, tag screens with `Sankofa.instance.screen('…')` (or
+`SankofaNavigatorObserver`). **User-property** rules read traits from
+`setPerson`, **Event** rules read on-device `track()` counts, **Cohort**
+rules are resolved server-side via the handshake, and **Feature-flag**
+rules read `SankofaSwitch`. **URL rules are web-only and ignored on Flutter
+— use a Screen rule.** Supply data the SDK can't see itself via
+`Sankofa.instance.pulse.setDefaultTargetingContext(userProperties: …,
+cohorts: …, flagValues: …)` or per-call `show(..., properties: …,
+cohorts: …)`.
+
+### Deploy — Flutter OTA updates
+
+Ship bug fixes and UI tweaks without an App Store / Play Store release.
+Apple PLA § 3.3.2 + Google Play DNA both permit interpreted code
+downloaded at runtime running in a VM — Sankofa Deploy ships under that
+carve-out via the Sankofa-forked Flutter engine's bytecode interpreter.
+
+**Setup (one time, ~30 seconds):**
+
+1. Create `sankofa.yaml` at your project root with your API key:
    ```yaml
    app_id: proj_xxxxxxxxxxxxx
    api_key: sk_live_xxxxxxxxxxxxxxxx
    ```
-
-   The `sankofa init` CLI command writes this for you; copy by hand if you
-   prefer.
-
-3. **Add the YAML to your assets** (already shown in [Install](#install)
-   above):
-
+2. Add it to `pubspec.yaml`'s assets:
    ```yaml
    flutter:
      assets:
        - sankofa.yaml
    ```
-
-4. **In `main()`**, call `preFlight` before `runApp`:
-
+3. Apply any patch the previous run staged, right before `runApp()`:
    ```dart
-   import 'package:sankofa_flutter/sankofa_flutter.dart';
-
    void main() async {
      WidgetsFlutterBinding.ensureInitialized();
      await SankofaUpdater.preFlight();
@@ -112,41 +253,29 @@ OTA updates for Flutter, App Store compliant, iOS + Android.
    }
    ```
 
-That's the entire setup. No engine version, no signing keys, no loaders to
-register. The CLI writes those into `sankofa.yaml` when you run
-`sankofa keys generate`; the SDK reads them transparently.
+That's the entire setup. The SDK reads `sankofa.yaml` on first call.
+You do not import any helper packages or register signing keys —
+those live inside `sankofa.yaml` (written by the CLI when you run
+`sankofa keys generate`) and the SDK reads them transparently.
 
-> **Why `preFlight()` exists** — Shorebird's customer code is literally
-> `void main() => runApp(MyApp())` because their patch mechanism runs in
-> native Rust before Dart starts. On iOS the kernel forbids that (no
-> `PROT_EXEC` mmap of unsigned files). Sankofa uses the legal alternative:
-> Dart kernel bytecode interpreted inside the signed app. Bytecode has to
-> be loaded into the Dart VM, which can only happen after Dart starts —
-> hence the one-line hook. A future engine release moves this inside the
-> Flutter engine fork (the customer's `main()` becomes Shorebird-equivalent
-> at that point).
-
-### Customer API
+**Check + download from anywhere in your app:**
 
 ```dart
-import 'package:sankofa_flutter/sankofa_flutter.dart';
-
 final updater = SankofaUpdater();
 
-// What patch is the device currently running? Returns null on baseline.
+// Currently-installed patch — null on baseline.
 final current = await updater.readCurrentPatch();
 print(current?.label ?? 'baseline');
 
-// Is a new patch available? Does NOT download — returns metadata only.
+// Is a new patch available?
 final result = await updater.checkForUpdate();
 if (result.hasUpdate) {
   final update = result.update!;
-
   if (update.isMandatory) {
-    // skip the prompt
+    // Skip the prompt — download immediately.
     await updater.downloadUpdate(update);
   } else {
-    // gate behind a user confirmation
+    // Gate behind a user confirmation.
     final yes = await showUpdateDialog(context, update);
     if (yes) {
       await updater.downloadUpdate(
@@ -161,298 +290,99 @@ if (result.hasUpdate) {
 ```
 
 After `downloadUpdate` returns, the patch is staged on disk. The next cold
-launch automatically applies it (the `preFlight` call you added in step 4
-picks it up). Show a "Restart to apply" prompt if you want — or do nothing
-and let the patch take effect on next launch.
+launch applies it automatically (the `preFlight()` call in step 3 picks it
+up). Optionally prompt for restart so the patch takes effect immediately.
 
-### What ships in a patch
-
-Patches are Dart kernel bytecode produced by the Sankofa CLI:
-
-```bash
-sankofa patch ios       # builds + signs + uploads
-sankofa patch android   # builds + signs + uploads
-```
-
-Patches replace code execution, not the app bundle. They cannot:
-
-- Add new native code or libraries (no new symbols beyond what the AOT app
-  already has).
-- Change the app's primary purpose (App Store rule — every patch should be a
-  bug fix, parameter tweak, or copy change).
-- Replace launcher icons / splash / `Info.plist` / `AndroidManifest.xml`.
-
-For changes outside those bounds, ship a new App Store / Play Store binary
-the normal way.
-
-### Rollback
-
-Sankofa Deploy auto-rolls-back patches that crash the app within 30 seconds
-of launch. Two consecutive quick crashes inside that window → the patch is
-moved to the `disabled/` slot and the last known-good patch is restored.
-The crashed label is added to a local ban list so the same patch isn't
-re-downloaded from the server.
-
-No host code required for rollback — the SDK handles it. Hosts can call
-`Sankofa.instance.deploy?.clearBannedKbcLabels()` if they ship a fixed
-re-issue under the same label (rare; usually a hotfix uses a new label).
+**Auto-rollback:** the SDK auto-disables any patch that crashes the app
+twice within 30 seconds of launch. The last known-good patch is
+restored automatically, and the bad label is added to a local ban list so
+the same patch isn't re-downloaded. No host code required.
 
 ---
 
-## Full SDK initialization
+## 🪤 Native crash bridge (Phase C)
 
-`SankofaUpdater.preFlight()` brings up Deploy plus everything else if you've
-configured it in `sankofa.yaml`. For projects that want explicit control over
-which products run, use `Sankofa.instance.init(...)` instead:
+The Flutter SDK is a **federated plugin** with a standalone native crash
+reporter in `ios/Classes/` and `android/src/main/kotlin/`. **Zero
+dependency** on the standalone `SankofaIOS` Pod or `dev.sankofa:sankofa`
+Maven artifact.
 
-```dart
-import 'package:sankofa_flutter/sankofa_flutter.dart';
+| Layer | Captured |
+|---|---|
+| Dart | `FlutterError.onError`, `PlatformDispatcher.onError`, isolate listeners |
+| iOS plugin | `NSSetUncaughtExceptionHandler`, POSIX signals (SIGSEGV/SIGABRT/SIGBUS/SIGILL/SIGFPE/SIGTRAP/SIGSYS), main-queue stalls |
+| Android plugin | Chained `Thread.UncaughtExceptionHandler`, ANR watcher (main thread > 5s) |
 
-void main() async {
-  WidgetsFlutterBinding.ensureInitialized();
-
-  await Sankofa.instance.init(
-    apiKey: 'sk_live_…',
-    endpoint: 'https://api.sankofa.dev',
-    appVersion: '1.0.0',
-
-    // ── Product switches (all default true except Deploy) ──
-    enableAnalytics: true,
-    enableCatch: true,
-    enableFlags: true,
-    enableConfig: true,
-    enablePulse: true,
-    enableDeploy: true,    // Deploy defaults OFF; flip on here
-
-    // ── Optional per-product config ──
-    catchEnvironment: 'production',
-    release: 'myapp@1.0.0',
-    flagDefaults: {'new_checkout': FlagDecision(value: false, reason: 'default')},
-    configDefaults: {'max_upload_mb': ItemDecision(value: 25, version: 1, reason: 'default')},
-    beforeSend: (event) {
-      if (event.message?.contains('setState called after dispose') ?? false) {
-        return null;
-      }
-      return event;
-    },
-  );
-
-  runApp(const MyApp());
-}
-```
-
-After `init()`, every product is reachable via the singleton:
-`Sankofa.instance.flags`, `.config`, `.pulse`, `.deploy`, `.catch`.
-
-`preFlight()` is a thin wrapper around `init()` that auto-reads `sankofa.yaml`
-and defaults Deploy on. Use whichever fits your app — they can be combined
-(call `preFlight()` first, then `init()` is a no-op).
+All three POST to the same `/api/catch/events` endpoint.
+`Sankofa.setUser` / `setTag(s)` / `flushCatch` mirror to the native side
+automatically.
 
 ---
 
-## Per-product usage
-
-### Analytics
-
-```dart
-Sankofa.instance.track('completed_purchase', {
-  'item_name': 'Vintage Camera',
-  'price': 120.50,
-  'currency': 'USD',
-});
-
-Sankofa.instance.identify('user_99');
-Sankofa.instance.setPerson(
-  name: 'Jane Doe',
-  email: 'jane@example.com',
-  properties: {'membership': 'Gold'},
-);
-```
-
-### Catch — error capture
-
-Static helpers work from anywhere once `init()` resolves. Dart-level errors
-(`FlutterError.onError`, `PlatformDispatcher.onError`, isolate listeners)
-plus iOS NSException / POSIX signals and Android JVM-uncaught / ANR all
-flow to the same endpoint.
-
-```dart
-try {
-  await chargeCard(amount);
-} catch (err, stack) {
-  Sankofa.captureException(err, stack);
-}
-
-Sankofa.captureMessage('payment retry attempted');
-Sankofa.log('checkout: applying coupon SUMMER25');
-
-Sankofa.setUser(CatchUserContext(id: 'u_42', email: 'ada@example.com'));
-Sankofa.setTag('flow', 'checkout');
-Sankofa.setExtra('cart_id', cart.id);
-
-Sankofa.withScope((scope) {
-  scope.setTag('checkout_step', 'payment');
-  scope.setLevel(CatchLevel.warning);
-  Sankofa.captureException(err);
-});
-```
-
-### Switch — feature flags
-
-```dart
-final flags = Sankofa.instance.flags!;
-if (flags.getFlag('new_checkout')) showNewCheckout();
-final variant = flags.getVariant('checkout_redesign', defaultValue: 'control');
-```
-
-### Config — remote config
-
-```dart
-final config = Sankofa.instance.config!;
-final maxUploads = config.get<int>('max_uploads_per_day', 25);
-```
-
-### Pulse — surveys
-
-Surveys flagged **auto-show** in the dashboard appear on their own. Targeting
-rules are AND-ed and evaluated on-device.
-
-```dart
-await Sankofa.instance.pulse.show(context, surveyId: 'nps-2024');
-
-Sankofa.instance.pulse.on(PulseEvent.surveyCompleted, (e) {
-  print('Survey ${e.surveyId} completed');
-});
-```
-
----
-
-## Session Replay
-
-Wrap your app with `SankofaReplayBoundary` to enable recording. Mask
-sensitive widgets with `SankofaMask`, and for screens that host external
-textures (video, maps, web views) use `SankofaReplaySuppress`.
-
-```dart
-MaterialApp(
-  navigatorObservers: [SankofaNavigatorObserver()],
-  home: const SankofaReplayBoundary(
-    child: MyHomePage(),
-  ),
-);
-
-// Mask passwords / balances / personal details — replaced with solid black
-// in the upload, untouched in the live UI.
-SankofaMask(
-  child: TextField(controller: _passwordController, obscureText: true),
-);
-
-// Suppress capture entirely for a subtree — videos, maps, WebViews.
-SankofaReplaySuppress(
-  child: BetterPlayer(controller: _videoController),
-);
-```
-
----
-
-## Troubleshooting
+## 🩺 Troubleshooting
 
 ### `[!] No podspec found for sankofa_flutter` on `pod install`
 
 Symptom: `cd ios && pod install` errors with
 `No podspec found for sankofa_flutter in .symlinks/plugins/sankofa_flutter/ios`.
 
-The podspec ships at `ios/sankofa_flutter.podspec`. The error means
-CocoaPods can't see it through the symlink. Three quick checks:
+v0.2.1+ ships the podspec correctly. If you're on **0.2.0**, bump to
+**0.2.1 or later** — the older release was missing the podspec from its
+published archive. Then:
 
 ```bash
-# 1. Where does Flutter think sankofa_flutter is installed?
-ls -l ios/.symlinks/plugins/sankofa_flutter
-
-# 2. Does that target dir contain the podspec?
-ls "$(readlink ios/.symlinks/plugins/sankofa_flutter)/ios"
-# expected: includes `sankofa_flutter.podspec`
+flutter clean
+rm -rf ios/Pods ios/Podfile.lock ios/.symlinks
+flutter pub get
+cd ios && pod install
 ```
 
-| If step 2 lists the `.podspec` | Stale CocoaPods state — `flutter clean && rm -rf ios/Pods ios/Podfile.lock ios/.symlinks && flutter pub get && cd ios && pod install` |
-| If step 2 does NOT list the `.podspec` | You're on a ref that pre-dates v0.2.1 — bump constraint to `^0.2.1`, then `flutter pub upgrade sankofa_flutter` |
+### Android: `Invalid external texture` during video playback
 
-v0.2.0 (now retracted) shipped without the podspec. **Anyone still on
-0.2.0 must bump to 0.2.1 or later.**
+Symptom: logcat repeats `Invalid external texture` while a
+`BetterPlayer` / `video_player` / `flutter_map` / `webview_flutter` screen
+is recorded by Session Replay.
 
-### Android: `Invalid external texture` logcat spam during video playback
+Fixed in v0.2.1. The replay recorder walks the tree before each capture
+and skips frames if a `Texture` / `AndroidView` / `UiKitView` /
+`PlatformViewLink` widget is present. For finer control, wrap the
+sensitive subtree in `SankofaReplaySuppress` (shown above).
 
-The replay recorder previously called `RepaintBoundary.toImage` over
-external-texture surfaces (BetterPlayer, `video_player`, `flutter_map`,
-`webview_flutter`). On Android Impeller this could invalidate the texture
-handle a media decoder was writing into.
+### Replay masks "blink" during screenshots
 
-Fixed in v0.2.1. The recorder now walks the tree before each capture and
-skips frames when an external texture is present. You can also wrap a
-specific subtree in `SankofaReplaySuppress` (shown above) for finer
-control.
-
-### Replay masks "blink" during capture
-
-Fixed in v0.2.1. Masking moved off-screen entirely — the live UI no
-longer flickers. Bump to v0.2.1 if you saw this on v0.2.0.
+Fixed in v0.2.1. `SankofaMask` no longer paints solid black in the live
+widget tree; masking happens off-screen on the captured bitmap. Bump to
+v0.2.1+.
 
 ### `LateInitializationError: Local 'result' has not been initialized.`
 
 Fixed in v0.2.1. Two SDK call sites used `RenderObject.debugNeedsPaint`,
-a debug-only Flutter API whose `result` local is assigned inside an
-`assert(() {...}())` that release/profile builds strip. Bump to v0.2.1.
+a debug-only Flutter API that throws in release/profile builds. Bump to
+v0.2.1+.
 
-### Updates aren't applying
+### OTA updates aren't applying after restart
 
-```bash
-# Check that the device sees the patch on disk:
-sankofa devices show <device-id>
-# or in the dashboard's Releases view
-```
+Verify in this order:
 
-If the patch is staged but `readCurrentPatch()` returns `null` after a
-restart, verify:
-
-- You called `await SankofaUpdater.preFlight()` BEFORE `runApp()` (otherwise
-  the boot-time apply doesn't run).
-- The dashboard's "rollout" for the release is set to `100%` (or includes
-  your device's distinct_id).
-- The device's app version matches the release's `target_binary_version`
-  exactly. Passing `1.0.0+12` when the release was published for `1.0.0`
-  matches; passing `1.0.0+12` when the release was published for `1.0.0+12`
-  also matches — the SDK compares against the dashboard's value verbatim.
+1. **`SankofaUpdater.preFlight()` is called before `runApp()`.** Without
+   it, the staged patch isn't read off disk on cold launch.
+2. **`sankofa.yaml` is listed in `pubspec.yaml`'s `flutter.assets:`.**
+   Otherwise the SDK can't find your `api_key` at runtime.
+3. **The dashboard's rollout for the release is 100%** (or explicitly
+   includes your device's `distinct_id`).
+4. **`app_version` matches.** The server matches the release's
+   `target_binary_version` to the device's app version verbatim — no
+   fuzzy semver matching.
 
 ---
 
-## Architecture in one paragraph
+## 📑 Documentation
 
-Sankofa Deploy ships Dart kernel bytecode (`.kbc`) over HTTPS, signed with
-Ed25519, verified on-device, and interpreted by `dart::Interpreter::Run`
-inside the signed Flutter engine fork. No JIT entitlement. No
-`PROT_EXEC` mmap. No native code is downloaded. Apple PLA § 3.3.2 and
-Google Play's DNA policy both explicitly permit this pattern; Microsoft
-CodePush (React Native) and Shorebird (Flutter) have shipped under the
-same carve-out for years. The full architecture (engine fork details,
-envelope format, server contract) lives in the
-[`flutter-deploy/` private repo](https://github.com/Sankofa-HQ/sankofa-flutter-deploy).
+For full API references and integration guides, visit the
+[Sankofa docs](https://docs.sankofa.dev/sdks/flutter/overview).
 
 ---
 
-## Documentation
-
-- [Pub.dev API docs](https://pub.dev/documentation/sankofa_flutter/latest/) —
-  auto-generated dartdoc for every public symbol
-- [Sankofa docs](https://docs.sankofa.dev/sdks/flutter/overview) — guides,
-  dashboard walkthrough, server self-hosting
-- [Integration cookbook](https://github.com/Sankofa-HQ/sankofa-flutter-deploy/blob/main/docs/codepush-integration-cookbook.md) —
-  the four gotchas + working `hello_codepush` reference app
-- [App Review notes template](https://github.com/Sankofa-HQ/sankofa-flutter-deploy/blob/main/docs/app-review-notes-template.md) —
-  copy-paste text for App Store Connect + Play Console submission
-- [CHANGELOG](./CHANGELOG.md) — all changes per version
-
----
-
-## License
+## 🛡 License
 
 Distributed under the MIT License. See `LICENSE` for more information.
