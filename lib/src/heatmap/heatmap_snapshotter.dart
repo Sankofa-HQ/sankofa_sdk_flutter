@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 
+import 'package:flutter/foundation.dart' show kDebugMode;
 import 'package:flutter/rendering.dart';
 import 'package:flutter/widgets.dart';
 import 'package:http/http.dart' as http;
@@ -90,7 +91,15 @@ class SankofaHeatmapSnapshotter {
 
     // Wait an extra frame if the boundary still needs paint — same
     // self-defense the replay recorder uses for the same race.
-    if (boundary.debugNeedsPaint) {
+    //
+    // CRITICAL: `RenderObject.debugNeedsPaint` is a debug-only getter.
+    // Its implementation assigns `result` from inside an assert(), which
+    // gets stripped in release / profile builds — accessing the getter
+    // then throws `LateInitializationError: Local 'result' has not been
+    // initialized.` This was a real production crash reported by a
+    // customer (v0.2.0). Gate the dirty check on kDebugMode so release
+    // builds skip the wait and just snapshot whatever is on screen.
+    if (kDebugMode && boundary.debugNeedsPaint) {
       await Future<void>.delayed(const Duration(milliseconds: 80));
       if (boundary.debugNeedsPaint) {
         // Still painting — bail; the next screen() call or session

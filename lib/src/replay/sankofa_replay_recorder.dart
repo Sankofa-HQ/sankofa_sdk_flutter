@@ -244,9 +244,15 @@ class SankofaReplayRecorder {
               as RenderRepaintBoundary?;
       if (boundary == null) return;
 
-      // 🚀 THE FIX: If it's dirty, wait for a few frames before snapping!
-      // This ensures we capture the 'final' rendered state for heatmaps.
-      if (boundary.debugNeedsPaint) {
+      // 🚀 If it's dirty, wait for a few frames before snapping so we
+      // capture the 'final' rendered state for heatmaps.
+      //
+      // CRITICAL: `debugNeedsPaint` is a debug-only getter — Flutter
+      // strips the assert that initialises its `result` local in
+      // release/profile builds, so accessing it throws
+      // `LateInitializationError`. Gate behind kDebugMode so release
+      // captures don't crash.
+      if (kDebugMode && boundary.debugNeedsPaint) {
         await Future.delayed(const Duration(milliseconds: 100));
       }
 

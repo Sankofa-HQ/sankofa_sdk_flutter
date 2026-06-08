@@ -1,6 +1,15 @@
 # Changelog
 
-## 0.2.1 — Replay fixes + restore missing iOS podspec
+## 0.2.1 — Release-mode crash fix, replay fixes, restore missing iOS podspec
+
+**Customer-blocking release crash fix:** the heatmap snapshotter and
+the replay recorder both called `RenderObject.debugNeedsPaint`, which
+is a debug-only getter (its `result` local is assigned inside an
+`assert(() { ... }())` that Flutter strips in release / profile
+builds). Accessing it then throws
+`LateInitializationError: Local 'result' has not been initialized.`
+Two call sites in v0.2.0; both now gated behind `kDebugMode` so release
+builds skip the wait and snapshot whatever is on screen.
 
 **Customer-blocking iOS bug fix:** v0.2.0 shipped to pub.dev without
 `ios/sankofa_flutter.podspec` — a stray `**/*.podspec` rule in
