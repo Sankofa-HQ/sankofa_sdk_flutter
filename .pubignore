@@ -9,9 +9,14 @@ example/
 **/.dart_tool/
 
 # Native CI artifacts that pollute the archive.
+# CRITICAL: do NOT exclude `**/*.podspec`. `ios/sankofa_flutter.podspec`
+# is the iOS plugin spec CocoaPods needs at `pod install` time. The
+# v0.2.0 release on pub.dev shipped without it (this pattern was here)
+# and every consumer hit `No podspec found for sankofa_flutter` until
+# they removed the dependency. Only `Pods/` and `Podfile.lock` are real
+# build/CI artifacts and safe to exclude.
 **/Pods/
 **/Podfile.lock
-**/*.podspec
 
 # Generated platform plumbing — Flutter regenerates per-consumer.
 ios/.symlinks/

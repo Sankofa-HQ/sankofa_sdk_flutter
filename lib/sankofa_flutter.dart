@@ -15,6 +15,7 @@ export 'src/replay/sankofa_replay.dart'
         SankofaReplayMode,
         SankofaReplayBoundary,
         SankofaMask,
+        SankofaReplaySuppress,
         SankofaNavigatorObserver;
 
 // Sankofa Switch — feature flags + A/B variants

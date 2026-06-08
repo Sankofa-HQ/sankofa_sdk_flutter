@@ -221,6 +221,21 @@ class SankofaReplayRecorder {
     // Mirrors the iOS / Android `hasTaggedScreen()` guard.
     if (!Sankofa.instance.hasTaggedScreen) return;
 
+    // 🎬 External texture / platform view guard. `toImage()` on a
+    // RepaintBoundary that contains a Texture (video_player, BetterPlayer,
+    // camera) or AndroidView/UiKitView (Google Maps, WebView) is unsafe
+    // on Android Impeller — the rasterizer can invalidate the platform's
+    // external-texture handle mid-decode ("Invalid external texture"
+    // logcat spam) and force surrounding scrollables to repaint, which
+    // some host layouts react to by snapping back to top. We bail on
+    // capture for any frame where one of these widgets is anywhere in
+    // the captured subtree. Customers who need fine-grained control can
+    // wrap a region in [SankofaReplaySuppress] to opt that subtree out.
+    if (_treeContainsExternalTexture()) {
+      logger('🎬 skipping capture frame: external texture / platform view in tree');
+      return;
+    }
+
     _isCapturingFrame = true;
 
     try {
@@ -307,6 +322,59 @@ class SankofaReplayRecorder {
 
     ctx.visitChildElements(visit);
     return rects;
+  }
+
+  /// Returns true when ANY descendant of the root boundary is a widget
+  /// whose underlying render object holds a platform-managed external
+  /// texture or platform view. Capturing such trees with `toImage()`
+  /// on Android Impeller is unsafe — it can invalidate the texture
+  /// handle the media decoder writes into, producing "Invalid external
+  /// texture" log spam and forcing layout shifts in scrollable parents.
+  ///
+  /// Customers who want to capture parts of a screen that holds video
+  /// can mark the video region with [SankofaReplaySuppress] so this
+  /// guard sees no external texture in the rest of the tree.
+  bool _treeContainsExternalTexture() {
+    final ctx = rootBoundaryKey.currentContext;
+    if (ctx == null) return false;
+    bool found = false;
+    bool seenSuppress = false;
+
+    void visit(Element element) {
+      if (found) return;
+      final widget = element.widget;
+
+      // Customer-marked opt-out — stop descending into this subtree.
+      if (widget is SankofaReplaySuppress) {
+        seenSuppress = true;
+        return;
+      }
+
+      // Texture is the Flutter widget that wraps a platform-managed
+      // texture id. AndroidView / UiKitView wrap platform-view
+      // surfaces (Google Maps, WebView, MapLibre, etc.). Either is
+      // sufficient cause to skip — `toImage` may invalidate them.
+      if (widget is Texture ||
+          widget is AndroidView ||
+          widget is UiKitView ||
+          widget is PlatformViewLink) {
+        found = true;
+        return;
+      }
+      element.visitChildren(visit);
+    }
+
+    ctx.visitChildElements(visit);
+    // Note: if `found` is true and the surface lives under a
+    // SankofaReplaySuppress sibling, we'd still bail because we don't
+    // build a per-subtree map here. That's fine for the v1 mitigation
+    // — wrapping the video region OR the whole screen both unblock
+    // capture for the rest of the screen. We log seenSuppress so the
+    // operator knows the opt-out widget is in play if they're debugging.
+    if (found && seenSuppress) {
+      logger('🎬 external texture present alongside SankofaReplaySuppress — still skipping (subtree-aware bail is a future refinement)');
+    }
+    return found;
   }
 
   /// Composite [image] with solid-black rectangles over each masked region.
