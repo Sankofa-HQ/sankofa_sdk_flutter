@@ -107,10 +107,14 @@ class KbcApplyException implements Exception {
 /// Flutter engine binary IS forked (verified via FLUTTER_ENGINE_VERSION
 /// in Flutter.framework), but Platform.version reflects the bundled
 /// Dart SDK version, which is unmodified.
-const bool _skipEngineCheck = bool.fromEnvironment(
+// String-based so both `=1` and `=true` work — bool.fromEnvironment
+// silently yields false for any value other than the literal `true`,
+// which made the documented `=1` form a no-op.
+const String _skipEngineCheckRaw = String.fromEnvironment(
   'SANKOFA_SKIP_ENGINE_CHECK',
-  defaultValue: false,
 );
+const bool _skipEngineCheck =
+    _skipEngineCheckRaw == '1' || _skipEngineCheckRaw == 'true';
 
 /// Returns null on success, an error message on failure.
 String? _engineCompatError(Map<String, dynamic> metadata) {

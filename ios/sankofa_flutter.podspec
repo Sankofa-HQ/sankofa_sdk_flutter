@@ -65,7 +65,12 @@ the standalone iOS SDK.
     # Static-lib symbols are namespaced via the umbrella header; tell
     # Xcode where to find the module map so `import SankofaUpdaterFFI`
     # resolves at compile time without bridging-header gymnastics.
-    'SWIFT_INCLUDE_PATHS' => '$(PODS_ROOT)/sankofa_flutter/SankofaUpdaterFFI.xcframework/ios-arm64/Headers',
+    # The modulemap lives per-slice inside the vendored xcframework, so
+    # the include path must match the active SDK — a single device-only
+    # path breaks simulator builds with "Unable to resolve module
+    # dependency: SankofaUpdaterFFI".
+    'SWIFT_INCLUDE_PATHS[sdk=iphoneos*]' => '$(PODS_ROOT)/sankofa_flutter/SankofaUpdaterFFI.xcframework/ios-arm64/Headers',
+    'SWIFT_INCLUDE_PATHS[sdk=iphonesimulator*]' => '$(PODS_ROOT)/sankofa_flutter/SankofaUpdaterFFI.xcframework/ios-arm64_x86_64-simulator/Headers',
   }
   s.swift_version = '5.0'
 end
