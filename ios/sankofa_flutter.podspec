@@ -69,8 +69,14 @@ the standalone iOS SDK.
     # the include path must match the active SDK — a single device-only
     # path breaks simulator builds with "Unable to resolve module
     # dependency: SankofaUpdaterFFI".
-    'SWIFT_INCLUDE_PATHS[sdk=iphoneos*]' => '$(PODS_ROOT)/sankofa_flutter/SankofaUpdaterFFI.xcframework/ios-arm64/Headers',
-    'SWIFT_INCLUDE_PATHS[sdk=iphonesimulator*]' => '$(PODS_ROOT)/sankofa_flutter/SankofaUpdaterFFI.xcframework/ios-arm64_x86_64-simulator/Headers',
+    # No SWIFT_INCLUDE_PATHS / module overrides for SankofaUpdaterFFI.
+    # The FFI surface (Classes/sankofa_updater.h, kept in sync by
+    # build-ios.sh) is a public header of this pod, so Swift sees the C
+    # declarations through the pod's own underlying clang module. Every
+    # external-module route (xcframework Headers modulemap) proved racy
+    # under Xcode 26: the explicit-module scanner runs before CocoaPods'
+    # copy phase on clean builds, and a SWIFT_INCLUDE_PATHS copy of the
+    # map collides with the copied one ("Redefinition of module").
   }
   s.swift_version = '5.0'
 end

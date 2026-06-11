@@ -1012,7 +1012,9 @@ class SankofaDeploy implements SankofaModule {
     } on KbcApplyException catch (err) {
       if (kDebugMode) {
         debugPrint(
-          '[Sankofa.deploy] staged patch at $patchPath failed to apply: ${err.message}',
+          '[Sankofa.deploy] staged patch at $patchPath failed to apply: ${err.message}'
+          '${err.cause != null ? '\n[Sankofa.deploy] cause: ${err.cause}' : ''}'
+          '${err.causeStackTrace != null ? '\n[Sankofa.deploy] cause stack:\n${err.causeStackTrace}' : ''}',
         );
       }
       final stack = _formatKbcStackTrace(err.causeStackTrace);

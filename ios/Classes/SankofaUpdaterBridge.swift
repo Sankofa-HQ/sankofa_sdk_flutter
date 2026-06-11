@@ -1,5 +1,10 @@
 import Foundation
-import SankofaUpdaterFFI
+// sankofa_updater.h is a public header of this pod (Classes/), so its C
+// declarations arrive via the pod's own underlying clang module — no
+// `import SankofaUpdaterFFI` needed. The previous explicit module came
+// from a modulemap inside the vendored xcframework, whose resolution
+// under CocoaPods raced Xcode 26's dependency scanner (flaky clean
+// builds) and collided with the copy-phase duplicate (redefinition).
 
 /// Swift-side façade over the Sankofa Rust updater's iOS FFI surface.
 ///
