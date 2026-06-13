@@ -52,6 +52,12 @@ class SankofaDeployPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                         ?: return result.error("BAD_ARG", "apiKey missing", null)
                     val endpoint = call.argument<String>("endpoint")
                         ?: return result.error("BAD_ARG", "endpoint missing", null)
+                    // Engine version of the RUNNING engine, supplied by the
+                    // Dart layer (SankofaDeployOptions.engineVersion). The
+                    // compile-time BASELINE_ENGINE_VERSION constant is only a
+                    // last-resort fallback — a stale constant mis-gates the
+                    // server's engine_version release filter.
+                    engineVersion = call.argument<String>("engineVersion") ?: BASELINE_ENGINE_VERSION
 
                     val dataDir = File(applicationContext.filesDir, "sankofa").apply { mkdirs() }
                     val baselineLibapp = ensureBaselineExtracted(dataDir)
@@ -73,7 +79,7 @@ class SankofaDeployPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                         apiKey,
                         baselineLibapp.absolutePath,
                         dataDir.absolutePath,
-                        BASELINE_ENGINE_VERSION,
+                        engineVersion,
                     )
                     if (rc == 0 || rc == 1) {
                         SankofaUpdaterJNI.isInitialized = true
@@ -276,7 +282,7 @@ class SankofaDeployPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
             "os_version" to osVersion,
             "locale" to locale,
             "abi" to abi,
-            "engine_version" to BASELINE_ENGINE_VERSION,
+            "engine_version" to engineVersion,
             // Phase 8 / pre-Phase 9: synthesize bucketing identifiers
             // from Settings.Secure.ANDROID_ID. The server's gating layer
             // requires BOTH distinct_id (the primary bucketing key,
@@ -473,6 +479,9 @@ class SankofaDeployPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
         // our Sankofa engine fork (Phase 3 marker). When the engine fork is
         // rebased to a new Flutter stable, update this constant in lockstep.
         private const val BASELINE_ENGINE_VERSION = "3.41.9+sankofa-1"
+
+        /** Running engine version from Dart init; falls back to the baseline constant. */
+        @Volatile private var engineVersion: String = BASELINE_ENGINE_VERSION
 
         // Reported in the User-Agent so server-side analytics can correlate
         // SDK versions with handshake outcomes. Bump when shipping a release.

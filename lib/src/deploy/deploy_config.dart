@@ -94,5 +94,10 @@ class SankofaDeployOptions {
         'endpoint': endpoint,
         'appReadyTimeoutMs': appReadyTimeout.inMilliseconds,
         'autoCheckOnStartup': autoCheckOnStartup,
+        // The Android plugin's handshake + nativeInit otherwise fall back
+        // to a compile-time baseline constant — which mis-gates the
+        // server's engine_version release filter the moment the app runs
+        // a newer engine than the constant.
+        if (engineVersion != null) 'engineVersion': engineVersion,
       };
 }
