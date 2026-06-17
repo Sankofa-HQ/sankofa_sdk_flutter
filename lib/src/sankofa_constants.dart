@@ -2,6 +2,12 @@ const String kQueueKey = 'sankofa_queue';
 const String kAnonIdKey = 'sankofa_anon_id';
 const String kUserIdKey = 'sankofa_user_id';
 const String kSessionIdKey = 'sankofa_session_id';
+
+/// Monotonic count of distinct sessions started on this device.
+/// Incremented once per genuine new session (cold start or post-timeout
+/// rotation). Feeds Pulse `session` targeting ("show on every Nth
+/// session"); also useful for first-run / Nth-launch analytics.
+const String kSessionCountKey = 'sankofa_session_count';
 const String kLastEventTimeKey = 'sankofa_last_event_time';
 const String kDefaultPropertiesKey = 'sankofa_default_props';
 

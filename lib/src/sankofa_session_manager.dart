@@ -10,15 +10,28 @@ class SankofaSessionManager {
   final Future<void> Function() onNewSession;
   String? _sessionId;
 
+  /// 1-based count of distinct sessions started on this device, cached
+  /// in memory after [refresh]/[startNewSession]. 0 until the first
+  /// session begins. Backed by [kSessionCountKey] in SharedPreferences.
+  int _sessionCount = 0;
+
   SankofaSessionManager({required this.logger, required this.onNewSession});
 
   String? get sessionId => _sessionId;
+
+  /// Number of distinct sessions this device has started, including the
+  /// current one. Pulse `session` targeting evaluates against this.
+  int get sessionCount => _sessionCount;
 
   static const int _timeoutMs = kSessionTimeoutMinutes * 60 * 1000;
 
   Future<void> refresh() async {
     final prefs = await SharedPreferences.getInstance();
     _sessionId = prefs.getString(kSessionIdKey);
+    // Hydrate the running session count so a reused (non-rotated)
+    // session still reports the right number to session-targeted Pulse
+    // rules. startNewSession() bumps it from here when a session begins.
+    _sessionCount = prefs.getInt(kSessionCountKey) ?? 0;
 
     if (_sessionId == null) {
       await startNewSession();
@@ -75,7 +88,13 @@ class SankofaSessionManager {
     final prefs = await SharedPreferences.getInstance();
     _sessionId = 's_${const Uuid().v4()}';
     await prefs.setString(kSessionIdKey, _sessionId!);
-    logger.log('🆕 New Session Started: $_sessionId');
+    // A genuine new session — advance the device session counter. Read
+    // from disk (not just _sessionCount) so a startNewSession() that
+    // runs before refresh() hydrated the count still increments from
+    // the persisted value rather than 0.
+    _sessionCount = (prefs.getInt(kSessionCountKey) ?? 0) + 1;
+    await prefs.setInt(kSessionCountKey, _sessionCount);
+    logger.log('🆕 New Session Started: $_sessionId (#$_sessionCount)');
     await onNewSession();
   }
 }

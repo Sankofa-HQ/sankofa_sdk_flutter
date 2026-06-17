@@ -1,5 +1,48 @@
 # Changelog
 
+## 0.2.2 — Pulse: session targeting, version-aware suppression, custom renderers
+
+A Pulse parity + robustness pass. All changes are additive — no breaking
+API changes.
+
+**Session-count targeting.** New `session` targeting rule — show a survey
+on every Nth session (`session_every`) and/or only after the Nth
+(`session_min`). Backed by a new persisted device session counter
+(`SankofaSessionManager.sessionCount`). The server defers on `session`
+rules (the count is a per-device value it never holds), so the SDK is the
+source of truth; the evaluator stays in lockstep with the Go/Web ports.
+
+**Version-aware suppression.** Completing or dismissing a survey now
+suppresses it only until a higher `version_number` is published, at which
+point per-respondent suppression (cooldown, response count, completed
+flag) resets so the new version re-surfaces. Surveys with no
+server-supplied version behave exactly as before.
+
+**Permanent completion suppression.** A completed survey is now marked
+done for the respondent — not merely cooled down — matching the
+documented "completion marks the survey done" contract. Programmatic
+`show()` still bypasses suppression.
+
+**Custom renderers.** `SankofaPulse.instance.registerRenderer(...)` lets a
+host present its own survey UI via `PulseRenderRequest` /
+`PulseSurveyRenderer`, while Pulse keeps owning targeting, suppression,
+partial-save, and analytics. Pass `null` to restore the built-in renderer.
+
+**Native bottom-sheet presentation.** The built-in renderer now presents
+as a bottom sheet on iOS/Android (centered dialog on desktop/web).
+Override with `SankofaPulse.instance.presentationStyle`.
+
+**Reliable dismissal events.** `surveyDismissed` now fires on every
+non-submit close — scrim tap, Android back, and bottom-sheet swipe-down —
+not just the ✕ button.
+
+**`setContext` convenience.** `SankofaPulse.instance.setContext({...})`
+mirrors the Web/RN API as an alias for
+`setDefaultTargetingContext(userProperties:)`.
+
+New exports: `PulseSurveyPresentation`, `PulseRenderRequest`,
+`PulseSurveyRenderer`.
+
 ## 0.2.1 — `SankofaUpdater` + customer-blocking fixes
 
 **New: `SankofaUpdater` — the one class.** A clean facade for OTA

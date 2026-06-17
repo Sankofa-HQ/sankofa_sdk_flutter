@@ -21,6 +21,18 @@ class PulseRuleKind {
   static const sampling = 'sampling';
   static const frequencyCap = 'frequency_cap';
   static const featureFlag = 'feature_flag';
+
+  /// Session-count targeting — e.g. "show on every 5th session" or
+  /// "only after the respondent's 3rd session". Resolves against the
+  /// SDK's persisted session counter (see `SankofaSessionManager`).
+  ///
+  /// This is a CLIENT-ONLY rule: the session count is a per-device value
+  /// the server never holds, so the server-side Go evaluator DEFERS
+  /// (passes) on a `session` rule and ships the survey, leaving the real
+  /// decision to [_evalSession] against the local counter. The server's
+  /// `targeting.KindSession` + `session_every`/`session_min` fields and
+  /// validation already match this — keep the two evaluators in lockstep.
+  static const session = 'session';
 }
 
 class PulseMatchOp {
@@ -70,6 +82,12 @@ class PulseTargetingRule {
   // feature_flag
   final String? flagKey;
   final Object? flagValue;
+  // session — count-based recurrence. `sessionEvery` matches on every
+  // Nth session (session_number % every == 0); `sessionMin` gates on a
+  // minimum session count (session_number >= min). Both may be set and
+  // are AND-ed; at least one must be present for the rule to match.
+  final int? sessionEvery;
+  final int? sessionMin;
 
   const PulseTargetingRule({
     required this.kind,
@@ -90,6 +108,8 @@ class PulseTargetingRule {
     this.frequencyWindowDays,
     this.flagKey,
     this.flagValue,
+    this.sessionEvery,
+    this.sessionMin,
   });
 
   factory PulseTargetingRule.fromJson(Map<String, dynamic> json) =>
@@ -115,6 +135,8 @@ class PulseTargetingRule {
             (json['frequency_window_days'] as num?)?.toInt(),
         flagKey: json['flag_key'] as String?,
         flagValue: json['flag_value'],
+        sessionEvery: (json['session_every'] as num?)?.toInt(),
+        sessionMin: (json['session_min'] as num?)?.toInt(),
       );
 }
 
@@ -137,6 +159,11 @@ class PulseEligibilityContext {
   final Map<String, Object?>? flagValues;
   final Map<String, int>? priorResponseCount;
 
+  /// 1-based count of distinct sessions this respondent has started on
+  /// this device. 0 means "unknown" (pre-init) and never matches a
+  /// `session` rule. Sourced from `SankofaSessionManager.sessionCount`.
+  final int? sessionNumber;
+
   const PulseEligibilityContext({
     required this.surveyId,
     required this.respondentExternalId,
@@ -147,6 +174,7 @@ class PulseEligibilityContext {
     this.cohorts,
     this.flagValues,
     this.priorResponseCount,
+    this.sessionNumber,
   });
 }
 
@@ -194,9 +222,35 @@ PulseDecision evaluatePulseTargeting(
       return _evalFrequencyCap(rule, ctx);
     case PulseRuleKind.featureFlag:
       return _evalFeatureFlag(rule, ctx);
+    case PulseRuleKind.session:
+      return _evalSession(rule, ctx);
     default:
       return (false, 'unknown rule kind');
   }
+}
+
+// ── Session ──────────────────────────────────────────────────────────
+
+(bool, String) _evalSession(
+  PulseTargetingRule rule,
+  PulseEligibilityContext ctx,
+) {
+  final n = ctx.sessionNumber ?? 0;
+  if (n <= 0) return (false, 'session count unknown');
+  final every = rule.sessionEvery;
+  final min = rule.sessionMin;
+  final hasEvery = every != null && every > 0;
+  final hasMin = min != null && min > 0;
+  if (!hasEvery && !hasMin) {
+    return (false, 'session rule has neither session_every nor session_min');
+  }
+  if (hasMin && n < min) {
+    return (false, 'session $n below minimum $min');
+  }
+  if (hasEvery && n % every != 0) {
+    return (false, 'session $n is not a multiple of $every');
+  }
+  return (true, '');
 }
 
 // ── URL ──────────────────────────────────────────────────────────────

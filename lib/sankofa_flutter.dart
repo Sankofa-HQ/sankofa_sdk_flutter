@@ -122,4 +122,7 @@ export 'src/pulse/branching.dart'
         resolvePulseBranching,
         evaluatePulseBranchingCondition;
 export 'src/pulse/translator.dart' show PulseTranslator;
-export 'src/pulse/survey_dialog.dart' show SankofaSurveyDialog;
+export 'src/pulse/survey_dialog.dart'
+    show SankofaSurveyDialog, PulseSurveyPresentation;
+export 'src/pulse/pulse_renderer.dart'
+    show PulseRenderRequest, PulseSurveyRenderer;

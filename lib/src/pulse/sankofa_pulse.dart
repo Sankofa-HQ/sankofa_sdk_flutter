@@ -14,6 +14,7 @@ import 'branching.dart';
 import 'pulse_client.dart';
 import 'pulse_models.dart';
 import 'pulse_queue.dart';
+import 'pulse_renderer.dart';
 import 'survey_dialog.dart';
 import 'targeting.dart';
 import 'translator.dart';
@@ -51,6 +52,22 @@ class SankofaPulse with WidgetsBindingObserver implements SankofaModule {
   /// Per-survey display behaviour (auto_show / cooldown / delay), populated
   /// alongside [_cached]. Drives [maybeAutoShow].
   Map<String, _SurveyDisplay> _display = const {};
+
+  /// Published version per survey id, populated alongside [_cached] on
+  /// each refresh. Drives version-aware suppression: a republished
+  /// survey (higher version) resets all per-respondent suppression so
+  /// it re-surfaces. 0 means the server didn't supply a version.
+  Map<String, int> _versions = const {};
+
+  /// Host-registered custom renderer (see [registerRenderer]). When
+  /// set, [_present] hands off to it instead of the built-in
+  /// [SankofaSurveyDialog].
+  PulseSurveyRenderer? _renderer;
+
+  /// Override how the built-in renderer presents. Null (the default)
+  /// auto-selects: a bottom sheet on iOS/Android, a centered dialog on
+  /// desktop/web. Ignored when a custom renderer is registered.
+  PulseSurveyPresentation? presentationStyle;
 
   PulseQueue? _queue;
   bool _registered = false;
@@ -476,6 +493,25 @@ class SankofaPulse with WidgetsBindingObserver implements SankofaModule {
     if (_registered) maybeAutoShow();
   }
 
+  /// Cross-SDK convenience alias for setting host-known user properties
+  /// as the default targeting context — mirrors the Web/RN docs'
+  /// `pulse.setContext({ tenantId, userRole })`. The map is treated as
+  /// `user_property` context (the most common case); for cohorts or
+  /// flag overrides use [setDefaultTargetingContext] directly. Replaces
+  /// the previously-set default user properties; safe to call
+  /// repeatedly.
+  void setContext(Map<String, Object?> properties) =>
+      setDefaultTargetingContext(userProperties: properties);
+
+  /// Register a custom survey renderer. When set, Pulse hands the
+  /// survey state + lifecycle controller to [renderer] (see
+  /// [PulseRenderRequest]) instead of presenting the built-in
+  /// [SankofaSurveyDialog]; Pulse still owns targeting, suppression,
+  /// partial-save, and analytics. Pass `null` to restore the built-in
+  /// renderer. Set [presentationStyle] to tune the built-in renderer's
+  /// chrome instead.
+  void registerRenderer(PulseSurveyRenderer? renderer) => _renderer = renderer;
+
   /// Build the full eligibility context. Precedence, lowest → highest:
   /// SDK-collected data → host defaults ([setDefaultTargetingContext])
   /// → per-call overrides.
@@ -506,6 +542,9 @@ class SankofaPulse with WidgetsBindingObserver implements SankofaModule {
       }),
       recentEvents: host.recentEventCounts(),
       priorResponseCount: Map<String, int>.from(_responseCounts),
+      // Device session counter for `session` targeting ("every Nth
+      // session"). 0 before the session manager has started a session.
+      sessionNumber: host.sessionManager?.sessionCount ?? 0,
       screenName: screen,
       // pageUrl is intentionally null — Flutter is screen-based. URL
       // rules are web-only and are dropped in [_eligible] so they can't
@@ -601,45 +640,49 @@ class SankofaPulse with WidgetsBindingObserver implements SankofaModule {
     Map<String, Object?> initialAnswers = const {},
     String? initialQuestionId,
   }) {
-    final fut = showDialog<void>(
-      context: context,
-      barrierDismissible: true,
-      builder: (ctx) => SankofaSurveyDialog(
-        survey: survey,
-        branchingRules: branchingRules,
-        translator: translator,
-        initialAnswers: initialAnswers,
-        initialQuestionId: initialQuestionId,
-        onProgress: externalId.isEmpty
-            ? null
-            : (answers, currentQuestionId) {
-                _schedulePartialSave(
-                  surveyId: surveyId,
-                  externalId: externalId,
-                  answers: answers,
-                  currentQuestionId: currentQuestionId,
-                );
-              },
-        onSubmit: (payload) {
-          // Server auto-deletes the partial on a successful insert.
-          // Best-effort client-side delete too so a dismissed-then-
-          // resumed-in-a-different-session doesn't surface a stale
-          // partial during the brief window.
-          _handleSubmit(_enrichContext(payload), surveyId: surveyId);
-          if (externalId.isNotEmpty) {
-            unawaited(_deletePartial(surveyId, externalId));
-          }
-          Navigator.of(ctx).maybePop();
-        },
-        onDismiss: () {
-          _emit(PulseEventPayload(
-            event: PulseEvent.surveyDismissed,
-            surveyId: surveyId,
-          ));
-          // Keep partial intact for resume — that's the whole point.
-        },
-      ),
+    // The "survey state + controller" handed to whichever renderer
+    // presents — built-in or host-registered. Pulse owns the lifecycle
+    // (suppression, partial-save, analytics); the renderer owns the UI.
+    final request = PulseRenderRequest(
+      survey: survey,
+      branchingRules: branchingRules,
+      translator: translator,
+      initialAnswers: initialAnswers,
+      initialQuestionId: initialQuestionId,
+      onProgress: externalId.isEmpty
+          ? null
+          : (answers, currentQuestionId) {
+              _schedulePartialSave(
+                surveyId: surveyId,
+                externalId: externalId,
+                answers: answers,
+                currentQuestionId: currentQuestionId,
+              );
+            },
+      onSubmit: (payload) {
+        // Server auto-deletes the partial on a successful insert.
+        // Best-effort client-side delete too so a dismissed-then-
+        // resumed-in-a-different-session doesn't surface a stale
+        // partial during the brief window.
+        _handleSubmit(_enrichContext(payload), surveyId: surveyId);
+        if (externalId.isNotEmpty) {
+          unawaited(_deletePartial(surveyId, externalId));
+        }
+      },
+      onDismiss: () {
+        _emit(PulseEventPayload(
+          event: PulseEvent.surveyDismissed,
+          surveyId: surveyId,
+        ));
+        // Keep partial intact for resume — that's the whole point.
+      },
     );
+
+    final renderer = _renderer;
+    final fut = renderer != null
+        ? renderer(context, request)
+        : _presentBuiltIn(context, request);
+
     _presenting = true;
     _shownThisSession.add(surveyId);
     unawaited(_stampShown(surveyId));
@@ -647,9 +690,70 @@ class SankofaPulse with WidgetsBindingObserver implements SankofaModule {
       event: PulseEvent.surveyShown,
       surveyId: surveyId,
     ));
-    // Clear the presenting guard once the dialog closes (submit or dismiss).
+    // Clear the presenting guard once the survey UI closes (submit or
+    // dismiss). A renderer that returns a never-completing future would
+    // wedge auto-show — documented on [PulseSurveyRenderer].
     fut.whenComplete(() => _presenting = false);
     return fut;
+  }
+
+  /// Built-in renderer: presents [SankofaSurveyDialog] as a bottom sheet
+  /// (mobile) or centered dialog, per [presentationStyle]. Both use
+  /// `useRootNavigator: true` so an auto-shown survey floats above the
+  /// host's own routes.
+  Future<void> _presentBuiltIn(
+    BuildContext context,
+    PulseRenderRequest request,
+  ) {
+    final presentation = _resolvePresentation();
+    Widget builder(BuildContext ctx) => SankofaSurveyDialog(
+          survey: request.survey,
+          branchingRules: request.branchingRules,
+          translator: request.translator,
+          initialAnswers: request.initialAnswers,
+          initialQuestionId: request.initialQuestionId,
+          presentation: presentation,
+          onProgress: request.onProgress,
+          onSubmit: (payload) {
+            request.onSubmit(payload);
+            Navigator.of(ctx).maybePop();
+          },
+          onDismiss: request.onDismiss,
+        );
+
+    if (presentation == PulseSurveyPresentation.bottomSheet) {
+      return showModalBottomSheet<void>(
+        context: context,
+        useRootNavigator: true,
+        isScrollControlled: true,
+        // The renderer paints its own rounded panel + grab handle.
+        backgroundColor: Colors.transparent,
+        builder: builder,
+      );
+    }
+    return showDialog<void>(
+      context: context,
+      useRootNavigator: true,
+      barrierDismissible: true,
+      builder: builder,
+    );
+  }
+
+  /// Resolve the effective built-in presentation: an explicit
+  /// [presentationStyle] wins; otherwise a bottom sheet on iOS/Android
+  /// and a centered dialog elsewhere (desktop/web).
+  PulseSurveyPresentation _resolvePresentation() {
+    final override = presentationStyle;
+    if (override != null) return override;
+    bool mobile = false;
+    try {
+      mobile = Platform.isIOS || Platform.isAndroid;
+    } catch (_) {
+      // Platform unavailable (e.g. web) — fall back to a dialog.
+    }
+    return mobile
+        ? PulseSurveyPresentation.bottomSheet
+        : PulseSurveyPresentation.dialog;
   }
 
   // ── Auto-show pump ────────────────────────────────────────────────
@@ -718,6 +822,11 @@ class SankofaPulse with WidgetsBindingObserver implements SankofaModule {
     PulseSurvey? candidate;
     for (final s in _cached) {
       if (_shownThisSession.contains(s.id)) continue;
+      // Permanent completion suppression — the respondent already
+      // finished this survey (reset on a version bump by
+      // _reconcileSurveyVersions). Programmatic show() deliberately
+      // bypasses this, same as it bypasses the cooldown.
+      if (_isCompleted(prefs, respondent, s.id)) continue;
       final d = _display[s.id];
       if (d != null && !d.autoShow) continue;
       // Targeting. URL rules are dropped inside _eligible (web-only);
@@ -774,6 +883,21 @@ class SankofaPulse with WidgetsBindingObserver implements SankofaModule {
   String _cooldownKey(String respondent, String surveyId) =>
       'sankofa.pulse.cooldown.$respondent.$surveyId';
 
+  /// Permanent "this respondent completed this survey" flag. Unlike the
+  /// dismiss cooldown, a completion suppresses the survey indefinitely —
+  /// until the survey is republished at a higher version, at which point
+  /// [_reconcileSurveyVersions] clears it. Matches the documented
+  /// contract: "completion marks the survey done for the user."
+  String _completedKey(String respondent, String surveyId) =>
+      'sankofa.pulse.completed.$respondent.$surveyId';
+
+  /// The survey version that the stored suppression state (cooldown,
+  /// response count, completed flag) corresponds to. When the live
+  /// version exceeds this, the survey was republished and all
+  /// suppression resets. See [_reconcileSurveyVersions].
+  String _suppVersionKey(String respondent, String surveyId) =>
+      'sankofa.pulse.suppver.$respondent.$surveyId';
+
   Future<void> _stampShown(String surveyId) async {
     try {
       final respondent = Sankofa.instance.identity?.distinctId ?? '';
@@ -783,6 +907,67 @@ class SankofaPulse with WidgetsBindingObserver implements SankofaModule {
         DateTime.now().millisecondsSinceEpoch,
       );
     } catch (_) {/* best-effort */}
+  }
+
+  /// Mark [surveyId] permanently completed for the current respondent
+  /// after a server-confirmed submit, so the auto-show pump never
+  /// re-presents it (until a new version republishes — see
+  /// [_reconcileSurveyVersions]).
+  Future<void> _markCompleted(String surveyId) async {
+    try {
+      final respondent = Sankofa.instance.identity?.distinctId ?? '';
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool(_completedKey(respondent, surveyId), true);
+    } catch (_) {/* best-effort — in-memory session guard still applies */}
+  }
+
+  /// True when [surveyId] is permanently suppressed for the current
+  /// respondent because they already completed it. [prefs] is passed in
+  /// so the auto-show pump reuses its single SharedPreferences read.
+  bool _isCompleted(
+    SharedPreferences prefs,
+    String respondent,
+    String surveyId,
+  ) =>
+      prefs.getBool(_completedKey(respondent, surveyId)) == true;
+
+  /// Reset per-respondent suppression for surveys republished since the
+  /// respondent last interacted. For each survey whose live version
+  /// exceeds the stored "suppression version", wipe cooldown + response
+  /// count + completed flag (disk + memory) so the new version
+  /// re-surfaces — the documented "re-trigger only after the survey is
+  /// updated to a new version".
+  ///
+  /// First sighting of a version (no stored value) is stamped WITHOUT
+  /// wiping: an SDK upgrade that begins tracking versions must not
+  /// re-show every previously-suppressed survey. Surveys with version 0
+  /// (server doesn't emit `version_number` yet) are skipped entirely —
+  /// suppression then behaves exactly as before versions were plumbed.
+  Future<void> _reconcileSurveyVersions() async {
+    if (_versions.isEmpty) return;
+    try {
+      final respondent = Sankofa.instance.identity?.distinctId ?? '';
+      final prefs = await SharedPreferences.getInstance();
+      for (final entry in _versions.entries) {
+        final surveyId = entry.key;
+        final liveVersion = entry.value;
+        if (liveVersion <= 0) continue; // server didn't supply a version
+        final verKey = _suppVersionKey(respondent, surveyId);
+        final storedVersion = prefs.getInt(verKey) ?? 0;
+        if (storedVersion == 0) {
+          await prefs.setInt(verKey, liveVersion);
+          continue;
+        }
+        if (liveVersion > storedVersion) {
+          await prefs.remove(_cooldownKey(respondent, surveyId));
+          await prefs.remove(_responseCountKey(respondent, surveyId));
+          await prefs.remove(_completedKey(respondent, surveyId));
+          _responseCounts.remove(surveyId);
+          _shownThisSession.remove(surveyId);
+          await prefs.setInt(verKey, liveVersion);
+        }
+      }
+    } catch (_) {/* best-effort — stale suppression is safe, not fatal */}
   }
 
   // ── Frequency-cap response counts ────────────────────────────────────
@@ -895,6 +1080,10 @@ class SankofaPulse with WidgetsBindingObserver implements SankofaModule {
         // Count the confirmed response so `frequency_cap` rules gate
         // future auto-shows for this respondent.
         unawaited(_bumpResponseCount(surveyId));
+        // Permanently suppress this survey for the respondent — a
+        // completion means "done", not "wait out the cooldown". Reset
+        // only when the survey is republished at a higher version.
+        unawaited(_markCompleted(surveyId));
         // Fire SURVEY_COMPLETED with the server-issued response id
         // so hosts can correlate against dashboard rows.
         _emit(PulseEventPayload(
@@ -965,6 +1154,14 @@ class SankofaPulse with WidgetsBindingObserver implements SankofaModule {
               delayMs: s.displayDelayMs,
             ),
         };
+        _versions = {
+          for (final s in summaries) s.id: s.versionNumber,
+        };
+        // Reset per-respondent suppression for any survey republished
+        // since this respondent last interacted, BEFORE the auto-show
+        // pump runs — so a freshly-bumped survey is eligible again on
+        // this very refresh.
+        await _reconcileSurveyVersions();
         final q = _queue;
         if (q != null) await q.drain((p) => c.submit(p));
         // A fresh list on a live screen should present an eligible auto_show

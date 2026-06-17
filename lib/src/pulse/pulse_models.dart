@@ -110,6 +110,14 @@ class PulseSurvey {
   final List<PulseQuestion> questions;
   final PulseTheme? theme;
 
+  /// Published version of this survey. Drives version-aware
+  /// suppression: completing/dismissing version N suppresses the
+  /// survey only until a version > N is published, at which point all
+  /// per-respondent suppression for it resets. 0 means the server
+  /// didn't supply a version (older engine) — suppression then behaves
+  /// as it did before versions were plumbed through.
+  final int versionNumber;
+
   const PulseSurvey({
     required this.id,
     required this.kind,
@@ -117,6 +125,7 @@ class PulseSurvey {
     this.description,
     this.questions = const [],
     this.theme,
+    this.versionNumber = 0,
   });
 
   factory PulseSurvey.fromJson(Map<String, dynamic> json) {
@@ -136,6 +145,7 @@ class PulseSurvey {
       theme: rawTheme is Map<String, dynamic>
           ? PulseTheme.fromJson(rawTheme)
           : null,
+      versionNumber: (json['version_number'] as num?)?.toInt() ?? 0,
     );
   }
 }
@@ -159,6 +169,10 @@ class PulseSurveySummary {
   final int displayCooldownSeconds;
   final int displayDelayMs;
 
+  /// Published version of the survey. See [PulseSurvey.versionNumber].
+  /// 0 when the server's list endpoint doesn't emit `version_number`.
+  final int versionNumber;
+
   const PulseSurveySummary({
     required this.id,
     required this.name,
@@ -170,6 +184,7 @@ class PulseSurveySummary {
     this.autoShow = true,
     this.displayCooldownSeconds = 7 * 24 * 60 * 60,
     this.displayDelayMs = 0,
+    this.versionNumber = 0,
   });
 
   factory PulseSurveySummary.fromJson(Map<String, dynamic> json) {
@@ -192,6 +207,7 @@ class PulseSurveySummary {
           (json['display_cooldown_seconds'] as num?)?.toInt() ??
               7 * 24 * 60 * 60,
       displayDelayMs: (json['display_delay_ms'] as num?)?.toInt() ?? 0,
+      versionNumber: (json['version_number'] as num?)?.toInt() ?? 0,
     );
   }
 
@@ -226,11 +242,14 @@ class PulseSurveySummary {
           }
           if (r.flagKey != null) m['flag_key'] = r.flagKey;
           if (r.flagValue != null) m['flag_value'] = r.flagValue;
+          if (r.sessionEvery != null) m['session_every'] = r.sessionEvery;
+          if (r.sessionMin != null) m['session_min'] = r.sessionMin;
           return m;
         }).toList(),
         'auto_show': autoShow,
         'display_cooldown_seconds': displayCooldownSeconds,
         'display_delay_ms': displayDelayMs,
+        'version_number': versionNumber,
       };
 }
 
@@ -300,6 +319,7 @@ class PulseSurveyBundle {
         description: survey.description,
         questions: questions,
         theme: survey.theme,
+        versionNumber: survey.versionNumber,
       );
     }
     final targeting = rawTargeting is List

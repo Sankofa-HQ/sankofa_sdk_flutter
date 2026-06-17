@@ -10,20 +10,28 @@ import 'branching.dart';
 import 'pulse_models.dart';
 import 'translator.dart';
 
+/// How the built-in survey renderer wraps itself. `dialog` is a
+/// centered Material card (`showDialog`); `bottomSheet` is an
+/// edge-to-edge sheet rising from the bottom (`showModalBottomSheet`),
+/// the native-feeling default on mobile.
+enum PulseSurveyPresentation { dialog, bottomSheet }
+
 /// Pure-Flutter survey renderer. Wraps every supported question kind
 /// in Material widgets — Theme.of(context) drives the look so the
 /// host app's brand colors apply automatically. Survey-level
 /// `theme.primary_color` overrides the seed when present.
 ///
-/// Lifecycle: caller mounts via `showDialog` (or `Navigator.push`
-/// for full-screen). The dialog drives the back/next/submit state
-/// machine and assembles the [PulseSubmitPayload] on submit.
+/// Lifecycle: caller mounts via `showModalBottomSheet` or `showDialog`
+/// (selected by [presentation]). The dialog drives the
+/// back/next/submit state machine and assembles the
+/// [PulseSubmitPayload] on submit.
 class SankofaSurveyDialog extends StatefulWidget {
   final PulseSurvey survey;
   final List<PulseBranchingRule> branchingRules;
   final PulseTranslator? translator;
   final Map<String, Object?> initialAnswers;
   final String? initialQuestionId;
+  final PulseSurveyPresentation presentation;
   final void Function(Map<String, Object?> answers, String currentQuestionId)? onProgress;
   final void Function(PulseSubmitPayload payload) onSubmit;
   final VoidCallback onDismiss;
@@ -35,6 +43,7 @@ class SankofaSurveyDialog extends StatefulWidget {
     this.translator,
     this.initialAnswers = const {},
     this.initialQuestionId,
+    this.presentation = PulseSurveyPresentation.dialog,
     this.onProgress,
     required this.onSubmit,
     required this.onDismiss,
@@ -49,6 +58,11 @@ class _SankofaSurveyDialogState extends State<SankofaSurveyDialog> {
   late final Map<String, Object?> _answers;
   int _index = 0;
   String? _error;
+
+  /// Set the instant the respondent submits, so the [PopScope] below
+  /// can tell a submit-then-pop apart from a genuine dismissal and emit
+  /// `onDismiss` for the latter only.
+  bool _submitted = false;
 
   /// Stack of indices the respondent has visited; used to retrace
   /// Back across skip-logic jumps. We push on every forward step
@@ -149,6 +163,7 @@ class _SankofaSurveyDialogState extends State<SankofaSurveyDialog> {
   }
 
   void _submit() {
+    _submitted = true;
     final answers = <String, Object?>{};
     for (final q in _questions) {
       final v = _answers[q.id];
@@ -269,119 +284,194 @@ class _SankofaSurveyDialogState extends State<SankofaSurveyDialog> {
         : (_index + 1) / _questions.length;
 
     final isRtl = pulseLocaleIsRTL(widget.translator?.locale);
-    final dialog = Dialog(
-      backgroundColor: bg,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-      insetPadding: const EdgeInsets.symmetric(horizontal: 24, vertical: 32),
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 480, maxHeight: 640),
-        child: Padding(
-          padding: const EdgeInsets.all(20),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              _header(context, fg: fg, muted: muted, fontFamily: fontFamily),
-              const SizedBox(height: 12),
-              ClipRRect(
-                borderRadius: BorderRadius.circular(8),
-                child: LinearProgressIndicator(
-                  value: progress,
-                  minHeight: 4,
-                  valueColor: AlwaysStoppedAnimation<Color>(accent),
-                ),
-              ),
-              const SizedBox(height: 16),
-              if (q != null) ...[
-                Flexible(
-                  child: SingleChildScrollView(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          widget.translator?.questionPrompt(q) ?? q.prompt,
-                          style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                            color: fg,
-                            fontFamily: fontFamily,
-                          ),
-                        ),
-                        () {
-                          final help =
-                              widget.translator?.questionHelptext(q) ?? q.helptext;
-                          if (help == null || help.isEmpty) {
-                            return const SizedBox.shrink();
-                          }
-                          return Padding(
-                            padding: const EdgeInsets.only(top: 4),
-                            child: Text(
-                              help,
-                              style: Theme.of(context)
-                                  .textTheme
-                                  .bodySmall
-                                  ?.copyWith(
-                                    color: muted,
-                                    fontFamily: fontFamily,
-                                  ),
-                            ),
-                          );
-                        }(),
-                        const SizedBox(height: 12),
-                        _renderInput(context, q, accent),
-                      ],
-                    ),
-                  ),
-                ),
-              ],
-              if (_error != null) ...[
-                const SizedBox(height: 8),
-                Text(
-                  _error!,
-                  style: TextStyle(color: errorColor, fontFamily: fontFamily),
-                ),
-              ],
-              const SizedBox(height: 16),
-              Row(
-                children: [
-                  Expanded(
-                    child: OutlinedButton(
-                      style: OutlinedButton.styleFrom(
-                        foregroundColor: fg,
-                        side: BorderSide(color: border),
-                        textStyle: TextStyle(fontFamily: fontFamily),
-                      ),
-                      onPressed: _history.isNotEmpty ? _goBack : null,
-                      child: const Text('Back'),
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: FilledButton(
-                      style: FilledButton.styleFrom(
-                        backgroundColor: accent,
-                        textStyle: TextStyle(fontFamily: fontFamily),
-                      ),
-                      onPressed: _goForward,
-                      child: Text(isLast ? 'Submit' : 'Next'),
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 12),
-              _PoweredBySankofa(muted: muted, border: border, fontFamily: fontFamily),
-            ],
+
+    // Shared inner content — identical across presentation modes; only
+    // the surrounding chrome (centered card vs. bottom sheet) differs.
+    final body = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        _header(context, fg: fg, muted: muted, fontFamily: fontFamily),
+        const SizedBox(height: 12),
+        ClipRRect(
+          borderRadius: BorderRadius.circular(8),
+          child: LinearProgressIndicator(
+            value: progress,
+            minHeight: 4,
+            valueColor: AlwaysStoppedAnimation<Color>(accent),
           ),
         ),
-      ),
+        const SizedBox(height: 16),
+        if (q != null) ...[
+          Flexible(
+            child: SingleChildScrollView(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    widget.translator?.questionPrompt(q) ?? q.prompt,
+                    style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                      color: fg,
+                      fontFamily: fontFamily,
+                    ),
+                  ),
+                  () {
+                    final help =
+                        widget.translator?.questionHelptext(q) ?? q.helptext;
+                    if (help == null || help.isEmpty) {
+                      return const SizedBox.shrink();
+                    }
+                    return Padding(
+                      padding: const EdgeInsets.only(top: 4),
+                      child: Text(
+                        help,
+                        style: Theme.of(context)
+                            .textTheme
+                            .bodySmall
+                            ?.copyWith(
+                              color: muted,
+                              fontFamily: fontFamily,
+                            ),
+                      ),
+                    );
+                  }(),
+                  const SizedBox(height: 12),
+                  _renderInput(context, q, accent),
+                ],
+              ),
+            ),
+          ),
+        ],
+        if (_error != null) ...[
+          const SizedBox(height: 8),
+          Text(
+            _error!,
+            style: TextStyle(color: errorColor, fontFamily: fontFamily),
+          ),
+        ],
+        const SizedBox(height: 16),
+        Row(
+          children: [
+            Expanded(
+              child: OutlinedButton(
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: fg,
+                  side: BorderSide(color: border),
+                  textStyle: TextStyle(fontFamily: fontFamily),
+                ),
+                onPressed: _history.isNotEmpty ? _goBack : null,
+                child: const Text('Back'),
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: FilledButton(
+                style: FilledButton.styleFrom(
+                  backgroundColor: accent,
+                  textStyle: TextStyle(fontFamily: fontFamily),
+                ),
+                onPressed: _goForward,
+                child: Text(isLast ? 'Submit' : 'Next'),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 12),
+        _PoweredBySankofa(muted: muted, border: border, fontFamily: fontFamily),
+      ],
     );
+
+    final Widget chrome = widget.presentation ==
+            PulseSurveyPresentation.bottomSheet
+        ? _bottomSheetChrome(context, bg: bg, muted: muted, child: body)
+        : Dialog(
+            backgroundColor: bg,
+            shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12)),
+            insetPadding:
+                const EdgeInsets.symmetric(horizontal: 24, vertical: 32),
+            child: ConstrainedBox(
+              constraints:
+                  const BoxConstraints(maxWidth: 480, maxHeight: 640),
+              child: Padding(
+                padding: const EdgeInsets.all(20),
+                child: body,
+              ),
+            ),
+          );
+
     // When the survey's resolved translation locale is RTL, force
     // the entire dialog tree into a right-to-left reading order
     // even if the host's MaterialApp/Locale is LTR. This mirrors
     // the Web SDK's `dir="rtl"` attribute on the rendered survey
     // root.
-    if (isRtl) {
-      return Directionality(textDirection: TextDirection.rtl, child: dialog);
-    }
-    return dialog;
+    final Widget presented = isRtl
+        ? Directionality(textDirection: TextDirection.rtl, child: chrome)
+        : chrome;
+
+    // Report `surveyDismissed` on EVERY close that isn't a submit —
+    // scrim tap, Android back, and (the common gesture on the bottom
+    // sheet) swipe-down. Previously only the ✕ button emitted it. The
+    // `_submitted` guard suppresses the event on the submit-then-pop
+    // path so onDismiss fires at most once per survey.
+    return PopScope(
+      canPop: true,
+      onPopInvokedWithResult: (didPop, _) {
+        if (didPop && !_submitted) widget.onDismiss();
+      },
+      child: presented,
+    );
+  }
+
+  /// Bottom-sheet chrome: an edge-to-edge panel with rounded top
+  /// corners, a grab handle, and a keyboard/safe-area-aware bottom
+  /// inset. Height is bounded so a long survey scrolls inside the sheet
+  /// rather than shoving the handle off-screen. `showModalBottomSheet`
+  /// is launched with `backgroundColor: transparent`, so this widget
+  /// paints its own background — keeping all theming inside the renderer.
+  Widget _bottomSheetChrome(
+    BuildContext context, {
+    required Color bg,
+    required Color muted,
+    required Widget child,
+  }) {
+    final media = MediaQuery.of(context);
+    return Padding(
+      // Lift the sheet above the on-screen keyboard when a text input
+      // is focused.
+      padding: EdgeInsets.only(bottom: media.viewInsets.bottom),
+      child: Container(
+        decoration: BoxDecoration(
+          color: bg,
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
+        ),
+        constraints: BoxConstraints(maxHeight: media.size.height * 0.9),
+        child: SafeArea(
+          top: false,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                margin: const EdgeInsets.only(top: 8, bottom: 4),
+                width: 36,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: muted.withValues(alpha: 0.4),
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+              Flexible(
+                child: Padding(
+                  padding:
+                      const EdgeInsets.fromLTRB(20, 8, 20, 16),
+                  child: child,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 
   Widget _header(
@@ -447,10 +537,9 @@ class _SankofaSurveyDialogState extends State<SankofaSurveyDialog> {
         IconButton(
           icon: Icon(Icons.close, size: 20, color: muted),
           tooltip: 'Dismiss',
-          onPressed: () {
-            widget.onDismiss();
-            Navigator.of(context).maybePop();
-          },
+          // Just pop — the PopScope reports the dismissal so every close
+          // path (✕, scrim, back, swipe) funnels through one emit.
+          onPressed: () => Navigator.of(context).maybePop(),
         ),
       ],
     );
