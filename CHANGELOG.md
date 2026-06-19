@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.2.3 — Fix iOS privacy manifest (App Store ITMS-91056)
+
+### Fixed
+- **`PrivacyInfo.xcprivacy` rejected by App Store Connect with ITMS-91056.** The
+  bundled privacy manifests (the pod's `sankofa_flutter_privacy.bundle` and both
+  `SankofaUpdaterFFI.xcframework` slices) contained XML comments that Apple's
+  ingest validator rejects even though they pass `plutil`/Xcode. Rewrote all
+  three to the clean, comment-free canonical form Apple's App-Privacy template
+  produces. No declaration change — same Required-Reason APIs (UserDefaults
+  `CA92.1`, FileTimestamp `C617.1`) and collected-data types (DeviceID,
+  CrashData; not linked, not tracking, app-functionality). Unblocks TestFlight /
+  App Store uploads of apps using the SDK.
+
 ## 0.2.2 — Pulse: session targeting, version-aware suppression, custom renderers
 
 A Pulse parity + robustness pass. All changes are additive — no breaking

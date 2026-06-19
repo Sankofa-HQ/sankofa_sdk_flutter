@@ -1,58 +1,36 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!--
-  PrivacyInfo.xcprivacy — SankofaUpdaterFFI.xcframework (ios-arm64 device slice)
-
-  Covers only the vendored Rust static library `libsankofa_updater_ffi.a`
-  shipping in this slice. The Swift bridge and Flutter glue have their own
-  manifest at sankofa_flutter/Resources/PrivacyInfo.xcprivacy.
-
-  Apple does not always merge static-CocoaPods manifests correctly during
-  IPA assembly, so this file is duplicated per slice as a belt-and-braces
-  safeguard against ITMS-91061 / ITMS-90683.
-
-  Rust updater (Sankofa Deploy) audit (2026-05-31):
-    - std::fs::metadata() reads on downloaded patch files for size check
-      (lowers to stat() on iOS → file timestamp category)
-    - No UserDefaults, no UIKit access; the Rust side talks to disk +
-      HTTPS only and forwards data to the Swift bridge via FFI.
-    - Data sent off-device: app_id, channel, release_version, patch_number,
-      arch, platform, client_id (anonymous, per-app, app-scoped). No PII.
--->
 <plist version="1.0">
 <dict>
-    <key>NSPrivacyAccessedAPITypes</key>
-    <array>
-        <dict>
-            <key>NSPrivacyAccessedAPIType</key>
-            <string>NSPrivacyAccessedAPICategoryFileTimestamp</string>
-            <key>NSPrivacyAccessedAPITypeReasons</key>
-            <array>
-                <!-- C617.1: Inside-app-container functionality (patch verify) -->
-                <string>C617.1</string>
-            </array>
-        </dict>
-    </array>
-
-    <key>NSPrivacyCollectedDataTypes</key>
-    <array>
-        <dict>
-            <key>NSPrivacyCollectedDataType</key>
-            <string>NSPrivacyCollectedDataTypeDeviceID</string>
-            <key>NSPrivacyCollectedDataTypeLinked</key>
-            <false/>
-            <key>NSPrivacyCollectedDataTypeTracking</key>
-            <false/>
-            <key>NSPrivacyCollectedDataTypePurposes</key>
-            <array>
-                <string>NSPrivacyCollectedDataTypePurposeAppFunctionality</string>
-            </array>
-        </dict>
-    </array>
-
-    <key>NSPrivacyTracking</key>
-    <false/>
-    <key>NSPrivacyTrackingDomains</key>
-    <array/>
+	<key>NSPrivacyTracking</key>
+	<false/>
+	<key>NSPrivacyTrackingDomains</key>
+	<array/>
+	<key>NSPrivacyCollectedDataTypes</key>
+	<array>
+		<dict>
+			<key>NSPrivacyCollectedDataType</key>
+			<string>NSPrivacyCollectedDataTypeDeviceID</string>
+			<key>NSPrivacyCollectedDataTypeLinked</key>
+			<false/>
+			<key>NSPrivacyCollectedDataTypeTracking</key>
+			<false/>
+			<key>NSPrivacyCollectedDataTypePurposes</key>
+			<array>
+				<string>NSPrivacyCollectedDataTypePurposeAppFunctionality</string>
+			</array>
+		</dict>
+	</array>
+	<key>NSPrivacyAccessedAPITypes</key>
+	<array>
+		<dict>
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategoryFileTimestamp</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<string>C617.1</string>
+			</array>
+		</dict>
+	</array>
 </dict>
 </plist>
