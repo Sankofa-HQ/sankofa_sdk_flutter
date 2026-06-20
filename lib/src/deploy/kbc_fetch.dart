@@ -114,6 +114,7 @@ Future<SankofaUpdateCheckResult> checkForKbcUpdate({
   required String distinctId,
   String platform = 'ios',
   String? currentLabel,
+  String? flavor,
   Duration timeout = const Duration(seconds: 30),
   Set<String>? bannedLabels,
 }) async {
@@ -127,6 +128,9 @@ Future<SankofaUpdateCheckResult> checkForKbcUpdate({
     'engine_version': engineVersion,
     'runtime': 'flutter-code',
     if (currentLabel != null) 'current_bundle_label': currentLabel,
+    // Flavor scopes the patch per product flavor (empty = wildcard, so
+    // unflavored apps + legacy releases are unaffected).
+    if (flavor != null && flavor.isNotEmpty) 'flavor': flavor,
   };
   final checkUri = Uri.parse('$base/api/deploy/check')
       .replace(queryParameters: qp);

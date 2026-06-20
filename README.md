@@ -227,9 +227,8 @@ cohorts: …)`.
 ### Deploy — Flutter OTA updates
 
 Ship bug fixes and UI tweaks without an App Store / Play Store release.
-Apple PLA § 3.3.2 + Google Play DNA both permit interpreted code
-downloaded at runtime running in a VM — Sankofa Deploy ships under that
-carve-out via the Sankofa-forked Flutter engine's bytecode interpreter.
+Sankofa Deploy is built to comply with both stores' policies on runtime
+updates (Apple PLA § 3.3.2, Google Play's DNA policy).
 
 **Setup (one time, ~30 seconds):**
 

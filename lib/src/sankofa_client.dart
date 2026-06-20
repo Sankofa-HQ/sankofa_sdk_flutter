@@ -262,6 +262,25 @@ class Sankofa {
   bool _initializing = false;
   Timer? _flushTimer;
 
+  // ── Remote-config refresh ──────────────────────────────────────────
+  // Config rides the unified handshake, so a "config fetch" is a
+  // handshake re-fetch (cheap via If-None-Match). _configRefreshTimer
+  // polls on _configFetchInterval; _lastHandshakeFetchAtMs backs the
+  // minimum-fetch-interval throttle; _handshakeRefreshInFlight makes
+  // concurrent refreshes single-flight.
+  Timer? _configRefreshTimer;
+  Uri? _serverBaseUri;
+  Duration _configFetchInterval = const Duration(minutes: 30);
+  int _lastHandshakeFetchAtMs = 0;
+  Future<bool>? _handshakeRefreshInFlight;
+
+  // Flutter product flavor this build is (prod/staging/…). Reported in
+  // the handshake so Deploy scopes OTA updates per flavor (empty = the
+  // app is unflavored → matches every release). Resolved from the
+  // init(flavor:) arg, else the `--dart-define=SANKOFA_FLAVOR=...` the
+  // CLI injects on flavored builds.
+  String _flavor = '';
+
   // Cached copies of the init-time credentials so modules constructed
   // after init() (Catch, Switch, Config) can resolve their own
   // endpoints without being passed the config twice.
@@ -398,6 +417,14 @@ class Sankofa {
     String catchEnvironment = 'live',
     String? release,
     String? appVersion,
+    /// Flutter product flavor this build was compiled as (e.g. 'prod',
+    /// 'staging'). Reported in the handshake so Sankofa Deploy scopes OTA
+    /// updates per flavor — a prod build only receives prod (or
+    /// unflavored) releases. Leave null for single-flavor apps. If null,
+    /// falls back to `--dart-define=SANKOFA_FLAVOR=<flavor>` (which
+    /// `sankofa release/patch --flavor` injects automatically), so you
+    /// usually don't pass it by hand.
+    String? flavor,
     /// Synchronous hook called AFTER an event has been composed but
     /// BEFORE it's enqueued.  Return the (possibly modified) event to
     /// ship it; return `null` to drop it entirely.  Use for PII
@@ -434,6 +461,16 @@ class Sankofa {
     // back synchronous reads before the handshake.
     bool enableConfig = true,
     Map<String, ItemDecision>? configDefaults,
+    /// How often the SDK refreshes remote config in the background by
+    /// re-running the unified handshake (cheap — If-None-Match yields a
+    /// 304 when nothing changed). This is ALSO the default
+    /// minimum-fetch-interval throttle applied to manual
+    /// `Sankofa.instance.config.refresh()` calls, mirroring Firebase
+    /// Remote Config. Defaults to 30 minutes. Pass [Duration.zero] to
+    /// disable background refresh (manual-only). Individual call sites
+    /// can override the throttle per-call via
+    /// `config.refresh(minimumFetchInterval: ...)`.
+    Duration configFetchInterval = const Duration(minutes: 30),
     // ── Pulse (in-app surveys) ─────────────────────────────────────
     //
     // Auto-registers [SankofaPulse] against the core we stand up below
@@ -452,6 +489,12 @@ class Sankofa {
 
     _apiKey = apiKey;
     _endpoint = endpoint;
+    _configFetchInterval = configFetchInterval;
+    // Explicit init(flavor:) wins; otherwise read the compile-time
+    // --dart-define the CLI injects on flavored builds. Empty = unflavored.
+    _flavor = (flavor != null && flavor.trim().isNotEmpty)
+        ? flavor.trim()
+        : const String.fromEnvironment('SANKOFA_FLAVOR');
     _analyticsEnabled = enableAnalytics;
     _logger = SankofaLogger(debug: debug);
     _identity = SankofaIdentity(logger: _logger);
@@ -559,6 +602,9 @@ class Sankofa {
         endpoint: endpoint,
         options: deployOptions,
         appVersion: resolvedAppVersion,
+        // Flavor scopes OTA patches per flavor on /api/deploy/check —
+        // same value the handshake reports.
+        flavor: _flavor.isNotEmpty ? _flavor : null,
         // Pass a getter so identify()/reset() flips reflect in
         // subsequent deploy calls without a re-init.
         distinctIdResolver: () => _identity.distinctId,
@@ -629,6 +675,7 @@ class Sankofa {
     final v1BaseUri = UriHelper.resolveV1BaseUri(endpoint);
     final trackUri = UriHelper.resolveTrackUri(endpoint);
     final serverBaseUri = UriHelper.resolveServerBaseUri(endpoint);
+    _serverBaseUri = serverBaseUri; // reused by refreshConfig()
 
     _queueManager = SankofaQueueManager(
       logger: _logger,
@@ -740,6 +787,22 @@ class Sankofa {
       const Duration(seconds: kFlushIntervalSeconds),
       (_) => _queueManager.flush(),
     );
+
+    // Remote-config refresh — give the Config module a hook for manual
+    // `config.refresh(...)`, then start the background poll that re-runs
+    // the handshake on _configFetchInterval (throttled + If-None-Match,
+    // so a 304 is cheap). Disabled when the interval is zero; floored at
+    // 10s so a misconfigured tiny interval can't hammer the server.
+    SankofaConfig.instance?.bindRefresher(
+      (interval, force) =>
+          refreshConfig(minimumFetchInterval: interval, force: force),
+    );
+    if (SankofaConfig.instance != null && _configFetchInterval > Duration.zero) {
+      final poll = _configFetchInterval < const Duration(seconds: 10)
+          ? const Duration(seconds: 10)
+          : _configFetchInterval;
+      _configRefreshTimer = Timer.periodic(poll, (_) => refreshConfig());
+    }
 
     // Live-presence heartbeat — independent of analytics flush so it
     // ticks at its own cadence (15s) while the app is foregrounded.
@@ -1103,6 +1166,11 @@ class Sankofa {
       } catch (_) {
         // Non-fatal.
       }
+      // Flutter flavor — lets Deploy scope OTA updates per flavor.
+      // Omitted when unflavored (server treats absent/empty as wildcard).
+      if (_flavor.isNotEmpty) {
+        query['flavor'] = _flavor;
+      }
 
       final uri = baseUri.replace(
         path: '/api/v1/handshake',
@@ -1121,6 +1189,7 @@ class Sankofa {
       // payload they missed (common during hot reload in dev).
       if (response.statusCode == 304 && _cachedHandshakeModules != null) {
         _logger.log('🤝 Handshake 304 — cached modules still current');
+        _lastHandshakeFetchAtMs = DateTime.now().millisecondsSinceEpoch;
         await SankofaModuleRegistry.instance
             .routeHandshake(_cachedHandshakeModules);
         return _cachedHandshakeModules;
@@ -1132,6 +1201,7 @@ class Sankofa {
             '🤝 Handshake OK (project: ${data['project_id']}, installed: $installed)');
         final modules = data['modules'] as Map<String, dynamic>?;
         _cachedHandshakeModules = modules;
+        _lastHandshakeFetchAtMs = DateTime.now().millisecondsSinceEpoch;
         final etag =
             response.headers['etag'] ?? response.headers['ETag'] ?? '';
         _handshakeEtag = etag;
@@ -1148,6 +1218,55 @@ class Sankofa {
       _logger.log('⚠️ Handshake failed: $e — falling back to legacy');
     }
     return null;
+  }
+
+  /// Refreshes remote config (and the rest of the unified handshake)
+  /// from the server, honoring a minimum-fetch-interval throttle —
+  /// Sankofa's analogue of Firebase Remote Config's `fetch()`.
+  ///
+  /// Returns `true` when a network fetch actually ran (config may have
+  /// changed — listeners registered via `config.onChange` fire on any
+  /// diff), or `false` when the last fetch was still within the throttle
+  /// window and the cached values were kept.
+  ///
+  /// [minimumFetchInterval] overrides — for THIS call only — the
+  /// `configFetchInterval` set at `init()`. Pass a shorter value on a
+  /// screen that needs fresher config than the global default, or
+  /// [Duration.zero] (or [force]) to always fetch. This is what lets
+  /// different call sites use different intervals.
+  ///
+  /// Reads stay synchronous and offline-safe throughout — the cache only
+  /// flips to new values once the fetch lands.
+  Future<bool> refreshConfig({
+    Duration? minimumFetchInterval,
+    bool force = false,
+  }) async {
+    if (!_isInitialized || _apiKey == null || _serverBaseUri == null) {
+      return false;
+    }
+    if (!force && _lastHandshakeFetchAtMs > 0) {
+      final interval = minimumFetchInterval ?? _configFetchInterval;
+      final age = DateTime.now().millisecondsSinceEpoch - _lastHandshakeFetchAtMs;
+      if (age < interval.inMilliseconds) {
+        return false; // within throttle window — cached values stand
+      }
+    }
+    // Single-flight: concurrent callers (timer + manual) await one fetch.
+    final inFlight = _handshakeRefreshInFlight;
+    if (inFlight != null) return inFlight;
+    final f = _doRefreshHandshake();
+    _handshakeRefreshInFlight =
+        f.whenComplete(() => _handshakeRefreshInFlight = null);
+    return _handshakeRefreshInFlight!;
+  }
+
+  Future<bool> _doRefreshHandshake() async {
+    try {
+      await _fetchHandshake(_apiKey!, _serverBaseUri!);
+      return true;
+    } catch (_) {
+      return false;
+    }
   }
 
   /// Legacy fallback for servers without the /api/v1/handshake endpoint.
@@ -1175,6 +1294,8 @@ class Sankofa {
   Future<void> dispose() async {
     _isInitialized = false;
     _flushTimer?.cancel();
+    _configRefreshTimer?.cancel();
+    _configRefreshTimer = null;
     _deepLinks.dispose();
     _lifecycleObserver.dispose();
     _presence?.stop();

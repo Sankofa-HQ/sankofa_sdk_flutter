@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.2.5 — Deploy: per-flavor OTA targeting
+
+### Added
+- **`Sankofa.instance.init(flavor:)`** — declare the build's Flutter
+  product flavor (e.g. `'prod'`, `'staging'`). The SDK reports it in the
+  handshake and on `/api/deploy/check`, so Sankofa Deploy scopes OTA
+  updates per flavor: a prod build only receives prod (or unflavored)
+  releases, and a staging patch can never land on a prod device.
+- Falls back to **`--dart-define=SANKOFA_FLAVOR=<flavor>`**, which
+  `sankofa release/patch --flavor` injects automatically — so flavored
+  apps get per-flavor targeting with no app-code change.
+
+Fully backward-compatible: an unflavored build reports no flavor and
+matches every release exactly as before (the server treats an empty
+release flavor as a wildcard).
+
+## 0.2.4 — Remote Config: configurable fetch interval + manual refresh
+
+### Added
+- **`configFetchInterval`** on `Sankofa.instance.init(...)` (default 30
+  minutes) — the SDK now refreshes remote config in the background on a
+  cadence you choose, by re-running the unified handshake (cheap:
+  `If-None-Match` yields a 304 when nothing changed). Pass
+  `Duration.zero` to disable background refresh (manual-only).
+- **`Sankofa.instance.config.refresh({minimumFetchInterval, force})`** —
+  manual fetch, mirroring Firebase Remote Config's `fetch()`. The
+  `minimumFetchInterval` argument overrides the init default **per call**,
+  so different screens/flows can use different intervals; `force: true`
+  (or `Duration.zero`) always fetches. Returns `true` when a network
+  fetch ran, `false` when the cached values were still within the
+  throttle window.
+
+Config already persisted to disk with a 7-day stale-while-revalidate
+window; this layers a configurable refresh cadence + on-demand fetch on
+top. Reads stay synchronous and offline-safe — values only flip once a
+fetch lands, and `onChange` listeners fire on any diff.
+
 ## 0.2.3 — Fix iOS privacy manifest (App Store ITMS-91056)
 
 ### Fixed

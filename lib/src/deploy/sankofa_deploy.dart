@@ -219,6 +219,13 @@ class SankofaDeploy implements SankofaModule {
   /// via `package_info_plus` and forwards.
   String? _defaultAppVersion;
 
+  /// Flutter product flavor (prod/staging/…), threaded from
+  /// `Sankofa.init(flavor:)`. Sent as the `flavor` query param on
+  /// `/api/deploy/check` so the server scopes patches per flavor. Falls
+  /// back to the compile-time `--dart-define=SANKOFA_FLAVOR` the CLI
+  /// injects on flavored builds. Empty = unflavored (server wildcard).
+  String? _flavor;
+
   /// Callback that returns the device's current distinct ID. Sourced
   /// from `Sankofa.instance.identity?.distinctId` so the same ID the
   /// analytics module uses also drives rollout hashing for patches.
@@ -260,6 +267,16 @@ class SankofaDeploy implements SankofaModule {
       'Sankofa.init() OR supply it directly to the check / download / '
       'fetch call.',
     );
+  }
+
+  /// Resolve the flavor: explicit arg → init(flavor:)-threaded value →
+  /// compile-time `--dart-define=SANKOFA_FLAVOR`. Returns "" when
+  /// unflavored, which the fetch path treats as "omit the param" so the
+  /// server applies its empty-flavor wildcard.
+  String _resolveFlavor(String? explicit) {
+    if (explicit != null && explicit.isNotEmpty) return explicit;
+    if (_flavor != null && _flavor!.isNotEmpty) return _flavor!;
+    return const String.fromEnvironment('SANKOFA_FLAVOR');
   }
 
   String _resolveEngineVersion(String? explicit) {
@@ -335,6 +352,7 @@ class SankofaDeploy implements SankofaModule {
     required String endpoint,
     required SankofaDeployOptions options,
     String? appVersion,
+    String? flavor,
     String Function()? distinctIdResolver,
   }) async {
     if (_instance != null) return _instance!;
@@ -342,6 +360,7 @@ class SankofaDeploy implements SankofaModule {
     deploy._ingestEndpoint = endpoint;
     deploy._ingestApiKey = apiKey;
     deploy._defaultAppVersion = appVersion;
+    deploy._flavor = flavor;
     deploy._distinctIdResolver = distinctIdResolver;
     // Register with the Traffic Cop BEFORE the platform init kicks off
     // so the first unified handshake (fired from Sankofa.init right
@@ -666,6 +685,7 @@ class SankofaDeploy implements SankofaModule {
     String? distinctId,
     String? platform,
     String? currentLabel,
+    String? flavor,
     Duration timeout = const Duration(seconds: 30),
   }) async {
     final banned = await getBannedKbcLabels();
@@ -677,6 +697,7 @@ class SankofaDeploy implements SankofaModule {
       distinctId: _resolveDistinctId(distinctId),
       platform: platform ?? _effectivePlatform,
       currentLabel: currentLabel,
+      flavor: _resolveFlavor(flavor),
       timeout: timeout,
       bannedLabels: banned.isEmpty ? null : banned,
     );

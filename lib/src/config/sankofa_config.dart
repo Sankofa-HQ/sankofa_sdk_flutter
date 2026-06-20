@@ -187,6 +187,44 @@ class SankofaConfig implements SankofaModule {
   /// sends this as `If-None-Match` on refresh.
   String get etag => _etag;
 
+  /// Manually refresh remote config from the server — Sankofa's analogue
+  /// of Firebase Remote Config's `fetch()`. Honors a minimum-fetch-
+  /// interval throttle so calling this often is cheap and safe.
+  ///
+  /// Returns `true` when a network fetch actually ran (values may have
+  /// changed — `onChange` listeners fire on any diff), or `false` when
+  /// the last fetch was still within the throttle window so the cached
+  /// values were kept.
+  ///
+  /// [minimumFetchInterval] overrides — for THIS call only — the
+  /// `configFetchInterval` set at `Sankofa.instance.init()`. Pass a
+  /// shorter value where you need fresher config than the global default
+  /// (so different screens/flows can use different intervals), or
+  /// [Duration.zero] / `force: true` to always fetch.
+  ///
+  /// ```dart
+  /// // Force-fresh on a settings screen, default everywhere else:
+  /// await Sankofa.instance.config.refresh(
+  ///   minimumFetchInterval: const Duration(minutes: 1),
+  /// );
+  /// ```
+  Future<bool> refresh({Duration? minimumFetchInterval, bool force = false}) {
+    final fn = _refresher;
+    if (fn == null) return Future.value(false);
+    return fn(minimumFetchInterval, force);
+  }
+
+  /// Wired by the core at init() so [refresh] can drive a handshake
+  /// re-fetch without this module importing the client. Host code never
+  /// calls this directly.
+  void bindRefresher(
+    Future<bool> Function(Duration? minimumFetchInterval, bool force) fn,
+  ) {
+    _refresher = fn;
+  }
+
+  Future<bool> Function(Duration? minimumFetchInterval, bool force)? _refresher;
+
   // ── Internals ─────────────────────────────────────────────────────
 
   ItemDecision? _resolve(String key) => _values[key] ?? _defaults[key];
