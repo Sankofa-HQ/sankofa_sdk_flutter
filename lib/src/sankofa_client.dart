@@ -608,6 +608,12 @@ class Sankofa {
         // Pass a getter so identify()/reset() flips reflect in
         // subsequent deploy calls without a re-init.
         distinctIdResolver: () => _identity.distinctId,
+        // Bridge Deploy lifecycle → analytics: keeps $ota_label current
+        // and drops a marker event when a patch applies/rolls back, so
+        // graphs can be sliced by patch + correlated with a deploy.
+        onLifecycleEvent: (eventType, {label, releaseId}) =>
+            _handleDeployLifecycleEvent(eventType,
+                label: label, releaseId: releaseId),
       ).then((deploy) async {
         // Post-init integration self-audit. Warns in debug mode when
         // the host's manifest, MainActivity, permissions, or meta-data
@@ -616,6 +622,14 @@ class Sankofa {
         // (and exposed via [lastDeployIntegrationStatus]). The report
         // itself is NOT fired here — see the Deploy-independent block
         // after this one.
+        // Seed OTA attribution from the patch the device actually booted
+        // on, so analytics events are tagged with the real active patch
+        // (not just "baseline") from app start.
+        try {
+          final cur = await deploy.readCurrentPatch();
+          _updateOtaSuperProps(cur?.label, cur?.releaseId);
+        } catch (_) {/* best-effort — baseline default already set */}
+
         final status = await deploy.checkIntegration();
         _lastDeployIntegrationStatus = status;
         if (!status.isFull && kDebugMode) {
@@ -759,6 +773,13 @@ class Sankofa {
 
     final networkProps = await SankofaNetworkInfo.getProperties(_logger);
     _defaultProperties.addAll(networkProps);
+
+    // Seed OTA attribution so EVERY analytics event carries it from the
+    // first event — even before Deploy's async boot resolves the active
+    // patch (and for analytics-only apps with no Deploy at all). The
+    // Deploy init block + lifecycle bridge refine this to the real patch
+    // label when one is active. See [_updateOtaSuperProps].
+    _defaultProperties[r'$ota_label'] = 'baseline';
 
     await _sessionManager.refresh();
 
@@ -945,6 +966,67 @@ class Sankofa {
   }
 
   /// Tracks a custom event with optional [properties].
+  /// Sets the OTA-attribution super-properties so every subsequent
+  /// analytics event carries the active patch identity. `null`/empty label
+  /// means the device is on its store build → `$ota_label: 'baseline'`.
+  /// Cheap: a couple of map writes, no disk I/O.
+  void _updateOtaSuperProps(String? label, String? releaseId) {
+    final resolved = (label != null && label.isNotEmpty) ? label : 'baseline';
+    _defaultProperties[r'$ota_label'] = resolved;
+    if (releaseId != null && releaseId.isNotEmpty) {
+      _defaultProperties[r'$ota_release_id'] = releaseId;
+    } else {
+      _defaultProperties.remove(r'$ota_release_id');
+    }
+    // Tag Dart-side crashes with the active patch too, so Catch can answer
+    // "which patch was this user on when it crashed". (OTA patches are Dart
+    // bytecode, so the Dart Catch path is where patch-induced crashes
+    // surface.) Best-effort — Catch may be disabled.
+    try {
+      SankofaCatch.instance?.setTag('ota_label', resolved);
+      if (releaseId != null && releaseId.isNotEmpty) {
+        SankofaCatch.instance?.setTag('ota_release_id', releaseId);
+      }
+    } catch (_) {/* Catch off / not ready */}
+  }
+
+  /// Bridges Deploy lifecycle events into analytics. On a successful apply
+  /// it refreshes [_updateOtaSuperProps] and emits a `$ota_applied` marker
+  /// (so a deploy shows up on the timeline / can be correlated with a
+  /// change in the numbers); on a rollback it resets to baseline and emits
+  /// `$ota_rolled_back`. Other lifecycle events (download, skipped) are
+  /// ignored for analytics. Invoked from [SankofaDeploy] via the
+  /// `onLifecycleEvent` callback registered at init.
+  void _handleDeployLifecycleEvent(
+    String eventType, {
+    String? label,
+    String? releaseId,
+  }) {
+    switch (eventType) {
+      case 'kbc_apply_success':
+      case 'kbc_boot_apply_success':
+        _updateOtaSuperProps(label, releaseId);
+        unawaited(track(r'$ota_applied', {
+          r'$ota_label': label ?? 'baseline',
+          if (releaseId != null && releaseId.isNotEmpty)
+            r'$ota_release_id': releaseId,
+        }));
+        break;
+      case 'kbc_boot_apply_skipped_rollback':
+      case 'kbc_patch_restored_from_last_good':
+        // Restored to the previous good patch (or baseline). The restored
+        // label isn't known here; reset to baseline — the next cold boot
+        // re-reads the real active patch at init.
+        _updateOtaSuperProps(null, null);
+        unawaited(track(r'$ota_rolled_back', {
+          if (label != null && label.isNotEmpty) r'$ota_from_label': label,
+        }));
+        break;
+      default:
+        break;
+    }
+  }
+
   Future<void> track(
     String eventName, [
     Map<String, dynamic>? properties,

@@ -233,6 +233,15 @@ class SankofaDeploy implements SankofaModule {
   /// value fresh across `identify()` / `reset()` calls.
   String Function()? _distinctIdResolver;
 
+  /// Invoked after every deploy lifecycle event (apply / boot-apply /
+  /// rollback / download) so the analytics module can keep its
+  /// `$ota_label` super-property current and drop a marker event when a
+  /// patch applies — giving analytics graphs OTA attribution ("which
+  /// patch was a user on", "did this patch move the numbers"). Set by
+  /// [SankofaClient] at init; null when analytics is disabled.
+  void Function(String eventType, {String? label, String? releaseId})?
+      _onLifecycleEvent;
+
   /// Resolve a runtime platform string. Defaults to `'ios'` /
   /// `'android'` via Platform.is*; can be overridden via
   /// [SankofaDeployOptions.platformOverride] for tests.
@@ -354,6 +363,8 @@ class SankofaDeploy implements SankofaModule {
     String? appVersion,
     String? flavor,
     String Function()? distinctIdResolver,
+    void Function(String eventType, {String? label, String? releaseId})?
+        onLifecycleEvent,
   }) async {
     if (_instance != null) return _instance!;
     final deploy = SankofaDeploy._(options: options);
@@ -362,6 +373,7 @@ class SankofaDeploy implements SankofaModule {
     deploy._defaultAppVersion = appVersion;
     deploy._flavor = flavor;
     deploy._distinctIdResolver = distinctIdResolver;
+    deploy._onLifecycleEvent = onLifecycleEvent;
     // Register with the Traffic Cop BEFORE the platform init kicks off
     // so the first unified handshake (fired from Sankofa.init right
     // after this call returns) has a route for `modules.deploy`. The
@@ -1296,6 +1308,14 @@ class SankofaDeploy implements SankofaModule {
     String? errorMessage,
     Map<String, Object?>? extra,
   }) async {
+    // Notify the analytics module of this lifecycle event so it can keep
+    // $ota_label current and drop a graph marker on apply. Done FIRST so
+    // it fires even when the deploy ingest endpoint is unset, and guarded
+    // so the analytics bridge can never break a deploy event.
+    try {
+      _onLifecycleEvent?.call(eventType, label: bundleLabel, releaseId: releaseId);
+    } catch (_) {/* analytics bridge is best-effort */}
+
     final endpoint = _ingestEndpoint;
     final apiKey = _ingestApiKey;
     if (endpoint == null || apiKey == null) return;
@@ -1312,10 +1332,17 @@ class SankofaDeploy implements SankofaModule {
           'error': _truncate(errorMessage, 512),
         if (extra != null) ...extra,
       };
+      // distinct_id ties this patch event to the same device identity the
+      // analytics + Catch pipelines use, so the dashboard can count unique
+      // devices (uniqIf(distinct_id)) and join deploy ↔ analytics ↔ crashes
+      // per device. Without it deploy_events.distinct_id was empty and
+      // patch "unique devices" always read 0.
+      final distinctId = _resolveDistinctId(null);
       final body = {
         'events': [
           {
             'event_type': eventType,
+            'distinct_id': distinctId,
             if (releaseId != null) 'release_id': releaseId,
             if (bundleLabel != null) 'bundle_label': bundleLabel,
             if (appVersion != null) 'app_version': appVersion,

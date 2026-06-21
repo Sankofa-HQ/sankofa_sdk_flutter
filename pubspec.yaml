@@ -1,6 +1,6 @@
 name: sankofa_flutter
 description: "Sankofa Flutter SDK — OTA code-push updates (Deploy), product analytics, session replay, crash reporting (Catch), feature flags (Switch), remote config, and in-app surveys (Pulse). Offline queueing and signed, integrity-checked updates built in."
-version: 0.2.5
+version: 0.2.6
 homepage: https://sankofa.dev
 repository: https://github.com/Sankofa-HQ/sankofa_sdk_flutter
 issue_tracker: https://github.com/Sankofa-HQ/sankofa_sdk_flutter/issues

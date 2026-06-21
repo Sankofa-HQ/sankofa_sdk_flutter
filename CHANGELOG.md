@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.2.6 — OTA ↔ analytics attribution
+
+Analytics and crashes now know which OTA patch a user is on, so you can
+slice graphs by patch version and see when a deploy moved the numbers.
+
+### Added
+- **`$ota_label` / `$ota_release_id` super-properties** on every analytics
+  event. Seeded from the patch the device booted on (or `'baseline'` for a
+  plain store build) and refreshed live when a patch applies or rolls back.
+  Filter/break-down any chart by `$ota_label` to compare patches.
+- **`$ota_applied` / `$ota_rolled_back` marker events** — fired when a
+  patch applies or auto-rolls-back, so a deploy shows up on the analytics
+  timeline and can be correlated with a change in your metrics.
+- **Catch crashes are tagged** with `ota_label` / `ota_release_id` — answer
+  "which patch was this user on when it crashed".
+
+### Fixed
+- **`/api/deploy/report` now sends `distinct_id`.** Patch lifecycle events
+  previously omitted it, so the dashboard's "unique devices" read 0 for
+  patches. Deploy ↔ analytics ↔ Catch can now be joined per device.
+
+All of the above is best-effort and never blocks app start; analytics-only
+apps (no Deploy) simply report `$ota_label: baseline`.
+
 ## 0.2.5 — Deploy: per-flavor OTA targeting
 
 ### Added
