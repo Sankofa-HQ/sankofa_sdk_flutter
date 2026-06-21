@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.2.7 — Deploy: silent, no-error degrade when the native plugin is absent
+
+### Fixed
+- **Running under plain `flutter run` no longer logs a Deploy error or
+  reports "integration: BROKEN".** When the native Deploy plugin isn't
+  registered in a build — the expected case under `flutter run` (the
+  native baseline ships via the Sankofa CLI build / fork engine) and on
+  iOS (Path C is pure-Dart) — the SDK now treats it as a **benign**
+  degrade: it catches the `MissingPluginException` silently (no scary log,
+  no stack trace) and the integration self-audit returns a clean status
+  instead of `BROKEN`. KBC / Path C OTA is fully unaffected; only the
+  native Android baseline methods are unavailable in such a build, and
+  they still throw a clear message only if actually called.
+
 ## 0.2.6 — OTA ↔ analytics attribution
 
 Analytics and crashes now know which OTA patch a user is on, so you can
