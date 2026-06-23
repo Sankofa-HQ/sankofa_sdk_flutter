@@ -296,6 +296,7 @@ class PulseSurveyBundle {
   factory PulseSurveyBundle.fromJson(Map<String, dynamic> json) {
     final rawSurvey = json['survey'];
     final rawQuestions = json['questions'];
+    final rawTheme = json['theme'];
     final rawTargeting = json['targeting_rules'];
     final rawBranching = json['branching_rules'];
     final rawTranslations = json['translations'];
@@ -304,24 +305,30 @@ class PulseSurveyBundle {
     if (rawSurvey is Map<String, dynamic>) {
       survey = PulseSurvey.fromJson(rawSurvey);
     }
-    // The bundle ships questions on a sibling key, not nested in
-    // survey — attach them here so callers see one self-contained
-    // PulseSurvey.
-    if (rawQuestions is List) {
-      final questions = rawQuestions
-          .whereType<Map<String, dynamic>>()
-          .map(PulseQuestion.fromJson)
-          .toList();
-      survey = PulseSurvey(
-        id: survey.id,
-        kind: survey.kind,
-        name: survey.name,
-        description: survey.description,
-        questions: questions,
-        theme: survey.theme,
-        versionNumber: survey.versionNumber,
-      );
-    }
+    // The bundle ships questions AND theme on sibling keys, not nested
+    // inside `survey` — fold them onto the survey so callers see one
+    // self-contained PulseSurvey. In particular the renderer reads
+    // `survey.theme` for colors; before this the sibling theme was
+    // dropped and surveys always rendered with the default palette.
+    // Fall back to any nested value if a sibling key is absent.
+    final questions = rawQuestions is List
+        ? rawQuestions
+            .whereType<Map<String, dynamic>>()
+            .map(PulseQuestion.fromJson)
+            .toList()
+        : survey.questions;
+    final theme = rawTheme is Map<String, dynamic>
+        ? PulseTheme.fromJson(rawTheme)
+        : survey.theme;
+    survey = PulseSurvey(
+      id: survey.id,
+      kind: survey.kind,
+      name: survey.name,
+      description: survey.description,
+      questions: questions,
+      theme: theme,
+      versionNumber: survey.versionNumber,
+    );
     final targeting = rawTargeting is List
         ? rawTargeting
             .whereType<Map<String, dynamic>>()
