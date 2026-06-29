@@ -109,6 +109,16 @@ class SankofaReplayUploader {
         '\$app_version': appVersion,
       };
 
+      // Authoritative wall-clock span for this chunk: from when the buffer
+      // opened (`startTime`) to flush time. Sending it lets the server report
+      // real session duration including idle time with no events/frames —
+      // without it the backend can only infer the span from event timestamps.
+      // Epoch ms keeps it uniform across SDKs (no date formatting).
+      final nowMs = DateTime.now().toUtc().millisecondsSinceEpoch;
+      final startedMs = startTime?.toUtc().millisecondsSinceEpoch ?? nowMs;
+      final eventCount =
+          mode == SankofaReplayMode.screenshot ? frames.length : events.length;
+
       final payload = {
         'session_id': _sessionId,
         'distinct_id': _distinctId,
@@ -119,6 +129,9 @@ class SankofaReplayUploader {
         '_distinct_id': _distinctId,
         '_chunk_index': _chunkIndex,
         '_replay_mode': mode.name,
+        '_started_at_ms': startedMs,
+        '_ended_at_ms': nowMs,
+        '_event_count': eventCount,
         '\$app_version': appVersion,
         'meta': {
           'current_screen': Sankofa.instance.currentScreen,
@@ -137,7 +150,7 @@ class SankofaReplayUploader {
         // single still frame instead of an animated sequence.  Falls
         // back to the upload-time millisecond if the recorder didn't
         // supply per-frame stamps.
-        final fallbackNow = DateTime.now().toUtc().millisecondsSinceEpoch;
+        final fallbackNow = nowMs;
         payload['frames'] = List<Map<String, dynamic>>.generate(
           frames.length,
           (i) => {
