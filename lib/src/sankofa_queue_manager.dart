@@ -138,6 +138,12 @@ class SankofaQueueManager {
               headers: {
                 'Content-Type': 'application/json',
                 'x-api-key': apiKey,
+                // Client clock at the moment we send. The server pairs this with
+                // its own receive time to measure (and correct) this device's
+                // clock skew, so events land at the true time even when the
+                // device clock is wrong. Recomputed on every (re)send, so a
+                // retried/offline batch reports its ACTUAL send time.
+                'x-sankofa-sent-at': DateTime.now().toUtc().toIso8601String(),
               },
               body: body,
             )
