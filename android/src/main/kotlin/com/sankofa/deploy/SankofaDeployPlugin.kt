@@ -39,12 +39,22 @@ class SankofaDeployPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
         try {
             when (call.method) {
                 "initialize" -> {
-                    // Skip if SankofaDeployApplication already pre-initialized
-                    // the updater during Application.onCreate. Re-init is
-                    // technically idempotent but generates duplicate state
-                    // load logs and replaces the live Manager singleton.
+                    // Skip re-init if SankofaDeployApplication already brought up
+                    // the Rust updater during Application.onCreate. BUT the pre-init
+                    // only had the manifest's fallback apiKey/endpoint and the
+                    // compile-time BASELINE_ENGINE_VERSION — all of which mis-gate
+                    // the server handshake. The Dart config (SankofaDeployOptions)
+                    // is AUTHORITATIVE, so adopt its engineVersion / apiKey / endpoint
+                    // here before the first checkForUpdate runs. Without this, the
+                    // native handshake sends a stale engine_version (→ no_matching_
+                    // release) and the manifest placeholder key (→ 401).
                     if (SankofaUpdaterJNI.isInitialized) {
-                        Log.i(TAG, "Updater already initialized (SankofaDeployApplication); skipping Dart-side init")
+                        call.argument<String>("engineVersion")?.let { engineVersion = it }
+                        call.argument<String>("apiKey")?.let { SankofaUpdaterJNI.apiKey = it }
+                        call.argument<String>("endpoint")?.let {
+                            SankofaUpdaterJNI.endpoint = it.trimEnd('/')
+                        }
+                        Log.i(TAG, "Updater already initialized (SankofaDeployApplication); adopted Dart config engineVersion=$engineVersion apiKey=${SankofaUpdaterJNI.apiKey?.take(12)}…")
                         return result.success(null)
                     }
 
