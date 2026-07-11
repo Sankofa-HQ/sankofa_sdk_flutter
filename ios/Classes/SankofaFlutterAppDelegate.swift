@@ -111,7 +111,7 @@ open class SankofaFlutterAppDelegate: FlutterAppDelegate {
         // engine's GetFlutterEngineVersion() so we can pass the live
         // value here. Until then, we use a stable placeholder that
         // matches the Sankofa fork marker baked into the engine.
-        let engineVersion = "3.41.9+sankofa-1"
+        let engineVersion = "3.44.1+sankofa-2"
 
         let code = SankofaUpdaterBridge.nativeInit(
             appId: bundleId,

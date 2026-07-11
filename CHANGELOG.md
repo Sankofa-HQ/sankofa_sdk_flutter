@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.2.8 — Deploy: correct engine version reporting + engine 3.44.1+sankofa-2
+
+### Fixed
+- **Deploy now reports the real engine version on the pre-initialized path.**
+  When the native updater was already initialized, the plugin adopted the Dart
+  config's `engineVersion` and `apiKey` instead of a stale compile-time baseline,
+  so the handshake matches the published release and updates are no longer
+  filtered out as `no_matching_release`.
+- **Native `BASELINE_ENGINE_VERSION` aligned to `3.44.1+sankofa-2`** (Android +
+  iOS) so the fallback matches the currently published Sankofa engine.
+
+### Added
+- **Clock-skew correction for analytics** — every batch sends an
+  `x-sankofa-sent-at` header (recomputed on each resend) so the server can
+  correct events from devices with wrong clocks to their true time.
+
 ## 0.2.7 — Deploy: silent, no-error degrade when the native plugin is absent
 
 ### Fixed

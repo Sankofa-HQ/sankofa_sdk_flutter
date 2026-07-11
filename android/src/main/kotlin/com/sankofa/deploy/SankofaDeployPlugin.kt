@@ -488,7 +488,7 @@ class SankofaDeployPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
         // Matches the version string emitted by GetFlutterEngineVersion() in
         // our Sankofa engine fork (Phase 3 marker). When the engine fork is
         // rebased to a new Flutter stable, update this constant in lockstep.
-        private const val BASELINE_ENGINE_VERSION = "3.41.9+sankofa-1"
+        private const val BASELINE_ENGINE_VERSION = "3.44.1+sankofa-2"
 
         /** Running engine version from Dart init; falls back to the baseline constant. */
         @Volatile private var engineVersion: String = BASELINE_ENGINE_VERSION

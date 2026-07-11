@@ -134,6 +134,6 @@ open class SankofaDeployApplication : FlutterApplication() {
     companion object {
         private const val TAG = "SankofaDeployApp"
         // Must match the Phase 3 marker in GetFlutterEngineVersion().
-        private const val BASELINE_ENGINE_VERSION = "3.41.9+sankofa-1"
+        private const val BASELINE_ENGINE_VERSION = "3.44.1+sankofa-2"
     }
 }
