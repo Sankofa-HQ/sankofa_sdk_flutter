@@ -38,7 +38,7 @@ Add the dependency to your `pubspec.yaml`:
 
 ```yaml
 dependencies:
-  sankofa_flutter: ^0.2.1
+  sankofa_flutter: ^0.2.8
 ```
 
 ### 2. Initialize
@@ -85,10 +85,7 @@ void main() async {
 ```
 
 After `init()`, reach any product through the client:
-`Sankofa.instance.flags`, `.config`, `.pulse`, `.errors`, `.deploy`. The
-legacy `SankofaSwitch()` / `SankofaConfig()` / `SankofaPulse.instance.register()`
-constructors still work (and win if you call them before `init`), but
-they're no longer required.
+`Sankofa.instance.flags`, `.config`, `.pulse`, `.errors`, `.deploy`.
 
 > **Turning a product off:** pass `enableFlags: false` (etc.) to skip
 > constructing it entirely. `enableAnalytics: false` ships a build that
@@ -230,49 +227,39 @@ Ship bug fixes and UI tweaks without an App Store / Play Store release.
 Sankofa Deploy is built to comply with both stores' policies on runtime
 updates (Apple PLA § 3.3.2, Google Play's DNA policy).
 
-**Setup (one time, ~30 seconds):**
+**Setup:** run the Sankofa CLI once — it wires everything for you: creates
+`sankofa.yaml`, adds the OTA runtime binding to your project, lists
+`sankofa.yaml` under `flutter.assets`, and initializes the loader in `main()`.
 
-1. Create `sankofa.yaml` at your project root with your API key:
-   ```yaml
-   app_id: proj_xxxxxxxxxxxxx
-   api_key: sk_live_xxxxxxxxxxxxxxxx
-   ```
-2. Add it to `pubspec.yaml`'s assets + add the VM-binding dep (see callout below):
-   ```yaml
-   dependencies:
-     sankofa_flutter: ^0.2.1
-     dynamic_modules:
-       git:
-         url: https://github.com/Sankofa-HQ/sankofa-dart-sdk.git
-         path: standalone/dynamic_modules
-         ref: main
-   flutter:
-     assets:
-       - sankofa.yaml
-   ```
-3. Register the loader + apply staged patch in `main()` (before `runApp`):
-   ```dart
-   import 'package:dynamic_modules/dynamic_modules.dart';
-   import 'package:sankofa_flutter/sankofa_flutter.dart';
+```bash
+npm i -g sankofa-cli
+sankofa init --deploy
+```
 
-   void main() async {
-     WidgetsFlutterBinding.ensureInitialized();
-     SankofaUpdater.registerLoader(loadModuleFromBytes);
-     await SankofaUpdater.preFlight();
-     runApp(const MyApp());
-   }
-   ```
+Then paste your project's `api_key` into `sankofa.yaml`:
 
-After `registerLoader`, every other API call is loader-free. Engine
-version + signing keys live in `sankofa.yaml` (written by the CLI when
-you run `sankofa keys generate`); customer code never touches them.
+```yaml
+app_id: proj_xxxxxxxxxxxxx
+api_key: sk_live_xxxxxxxxxxxxxxxx
+```
 
-> **Why `dynamic_modules` is a separate dep:** the underlying VM binding
-> (`loadModuleFromBytes`) imports `dart:_internal`, which pub.dev
-> refuses to publish. The package lives in a separate repo; you
-> reference it via git. A future release will move the binding into our
-> bundled Flutter SDK so the dep drops out — for now it's one extra
-> pubspec stanza.
+After setup, your `main()` looks like this (the CLI writes it for you):
+
+```dart
+import 'package:dynamic_modules/dynamic_modules.dart';
+import 'package:sankofa_flutter/sankofa_flutter.dart';
+
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  SankofaUpdater.registerLoader(loadModuleFromBytes);
+  await SankofaUpdater.preFlight();   // applies any staged patch on cold launch
+  runApp(const MyApp());
+}
+```
+
+After `registerLoader`, every other API call is loader-free. Engine version +
+signing keys live in `sankofa.yaml` (managed by the CLI); customer code never
+touches them.
 
 **Check + download from anywhere in your app:**
 
@@ -316,12 +303,10 @@ the same patch isn't re-downloaded. No host code required.
 
 ---
 
-## 🪤 Native crash bridge (Phase C)
+## 🪤 Native crash bridge
 
-The Flutter SDK is a **federated plugin** with a standalone native crash
-reporter in `ios/Classes/` and `android/src/main/kotlin/`. **Zero
-dependency** on the standalone `SankofaIOS` Pod or `dev.sankofa:sankofa`
-Maven artifact.
+The Flutter SDK ships a standalone native crash reporter built into the
+plugin (iOS + Android) — no separate native SDK to install.
 
 | Layer | Captured |
 |---|---|
@@ -329,52 +314,12 @@ Maven artifact.
 | iOS plugin | `NSSetUncaughtExceptionHandler`, POSIX signals (SIGSEGV/SIGABRT/SIGBUS/SIGILL/SIGFPE/SIGTRAP/SIGSYS), main-queue stalls |
 | Android plugin | Chained `Thread.UncaughtExceptionHandler`, ANR watcher (main thread > 5s) |
 
-All three POST to the same `/api/catch/events` endpoint.
-`Sankofa.setUser` / `setTag(s)` / `flushCatch` mirror to the native side
-automatically.
+All three report through the same Catch pipeline. `Sankofa.setUser` /
+`setTag(s)` / `flushCatch` mirror to the native side automatically.
 
 ---
 
 ## 🩺 Troubleshooting
-
-### `[!] No podspec found for sankofa_flutter` on `pod install`
-
-Symptom: `cd ios && pod install` errors with
-`No podspec found for sankofa_flutter in .symlinks/plugins/sankofa_flutter/ios`.
-
-v0.2.1+ ships the podspec correctly. If you're on **0.2.0**, bump to
-**0.2.1 or later** — the older release was missing the podspec from its
-published archive. Then:
-
-```bash
-flutter clean
-rm -rf ios/Pods ios/Podfile.lock ios/.symlinks
-flutter pub get
-cd ios && pod install
-```
-
-### Android: `Invalid external texture` during video playback
-
-Symptom: logcat repeats `Invalid external texture` while a
-`BetterPlayer` / `video_player` / `flutter_map` / `webview_flutter` screen
-is recorded by Session Replay.
-
-Fixed in v0.2.1. The replay recorder walks the tree before each capture
-and skips frames if a `Texture` / `AndroidView` / `UiKitView` /
-`PlatformViewLink` widget is present. For finer control, wrap the
-sensitive subtree in `SankofaReplaySuppress` (shown above).
-
-### Replay masks "blink" during screenshots
-
-Fixed in v0.2.1. `SankofaMask` no longer paints solid black in the live
-widget tree; masking happens off-screen on the captured bitmap. Bump to
-v0.2.1+.
-
-### `LateInitializationError: Local 'result' has not been initialized.`
-
-Fixed in v0.2.1. Two SDK call sites used `RenderObject.debugNeedsPaint`,
-a debug-only Flutter API that throws in release/profile builds. Bump to
-v0.2.1+.
 
 ### OTA updates aren't applying after restart
 

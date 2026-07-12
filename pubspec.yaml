@@ -1,6 +1,6 @@
 name: sankofa_flutter
 description: "Sankofa Flutter SDK — OTA code-push updates (Deploy), product analytics, session replay, crash reporting (Catch), feature flags (Switch), remote config, and in-app surveys (Pulse). Offline queueing and signed, integrity-checked updates built in."
-version: 0.2.8
+version: 0.2.9
 homepage: https://sankofa.dev
 repository: https://github.com/Sankofa-HQ/sankofa_sdk_flutter
 issue_tracker: https://github.com/Sankofa-HQ/sankofa_sdk_flutter/issues
@@ -45,26 +45,18 @@ dependencies:
   # apps; declaring it here makes the SDK self-contained.
   path_provider: ^2.1.0
 
-  # `dynamic_modules` is the Sankofa-fork Dart SDK's binding to
-  # `dart:_internal.loadDynamicModule` — the VM entry point we use to
-  # bring a downloaded patch into the running isolate.
+  # `dynamic_modules` (the Dart-fork binding to `dart:_internal`'s
+  # dynamic-module loader) is deliberately NOT a dependency of this
+  # package: pub.dev refuses git/path deps, and the binding imports
+  # `dart:_internal`, which can't be published as a hosted package.
+  # Instead, `sankofa init --deploy` vendors it into the customer's
+  # project and the customer registers the loader once in `main()`:
   #
-  # Customers add `sankofa_flutter: ^X.Y.Z` only. The standalone
-  # trampoline at `sankofa-dart-sdk/standalone/dynamic_modules/` (a
-  # clean copy with no monorepo path deps) is pulled in transitively
-  # via this git ref, so the customer's `main()` is just:
-  #
+  #     SankofaUpdater.registerLoader(loadModuleFromBytes);
   #     await SankofaUpdater.preFlight();
   #
-  # No `dynamic_modules` import, no `registerLoader` — sankofa_flutter
-  # imports it internally on the customer's behalf.
-  # NOTE: `dynamic_modules` is NOT a dependency. Pub.dev refuses git
-  # and path deps in published packages, and the underlying binding
-  # imports `dart:_internal` which can't be published as a hosted
-  # package. We vendored the 5-line wrapper into
-  # `lib/src/deploy/_dynamic_modules.dart` instead. Customer code
-  # never imports `dynamic_modules` — `SankofaUpdater.preFlight()`
-  # picks the vendored binding up internally.
+  # Folding this binding into the engine so that customer step drops out
+  # is planned for the stable-Flutter catch-up.
 
 dev_dependencies:
   flutter_test:

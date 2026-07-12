@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.9 — docs: accurate Deploy setup
+
+### Changed
+- **README Deploy setup no longer points at a private repo.** The old
+  instructions added a `git:` dependency on a private fork (which customers
+  can't clone); setup now runs `sankofa init --deploy`, which vendors the OTA
+  runtime binding locally. Fixed the stale version pin, removed internal
+  jargon/endpoints, and dropped migration notes (this is a fresh release).
+
 ## 0.2.8 — Deploy: correct engine version reporting + engine 3.44.1+sankofa-2
 
 ### Fixed
