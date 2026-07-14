@@ -36,6 +36,10 @@ class SankofaDeployPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
     }
 
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
+        // Any MethodChannel traffic proves the Dart runtime booted — clear the
+        // boot-guard failure counter for the pending patch (crash → auto-
+        // rollback semantics; see SankofaBootGuard). Idempotent + cheap.
+        SankofaBootGuard.markBootHealthy(applicationContext)
         try {
             when (call.method) {
                 "initialize" -> {

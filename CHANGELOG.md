@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.2.10 — Deploy: crash → auto-rollback boot-guard (Android)
+
+### Fixed
+- **A bad patch can no longer boot-loop the app.** New native
+  `SankofaBootGuard`: every boot that hands an OTA patch to the engine is
+  counted before Dart starts; the first MethodChannel call from Dart marks the
+  boot healthy and clears the counter. A patch that burns 2 boots without a
+  healthy Dart runtime is tombstoned — the app falls back to the APK baseline
+  `libapp.so` and the stale `current_bundle_label` is cleared so the next
+  handshake re-offers the best available release. Without this, a patch that
+  crashed before the first frame looped forever, and even a server-side
+  rollback couldn't rescue the device (the rescue channel — the handshake —
+  runs from Dart, which never came up). Tombstones are per patch id and
+  persist, so re-offering the same broken bytes can't re-brick the device.
+  Verified on-device: bad patch → 2 crash boots → baseline auto-restore →
+  server rollback → device recovers forward to the newest good patch.
+
 ## 0.2.9 — docs: accurate Deploy setup
 
 ### Changed

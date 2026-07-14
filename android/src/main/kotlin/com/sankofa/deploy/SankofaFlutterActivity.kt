@@ -41,6 +41,18 @@ open class SankofaFlutterActivity : FlutterActivity() {
             return base
         }
 
+        // Boot-guard (crash → auto-rollback): a patch that repeatedly boots
+        // without Dart ever coming up healthy gets tombstoned and we fall back
+        // to the APK baseline — otherwise a bad patch boot-loops forever and
+        // even a server-side rollback can't rescue the device (the rescue
+        // channel — the handshake — runs from Dart). See SankofaBootGuard.
+        val patchId = java.io.File(overridePath).parentFile?.name ?: overridePath
+        if (!SankofaBootGuard.shouldUsePatch(this, patchId)) {
+            Log.w(TAG, "Boot-guard refused patch $patchId; using APK default libapp.so")
+            return base
+        }
+        SankofaBootGuard.noteBootAttempt(this, patchId)
+
         Log.i(TAG, "Sankofa patch active → $overridePath")
         val extended = base.toArray().toMutableList().apply {
             add("--aot-shared-library-name=$overridePath")
