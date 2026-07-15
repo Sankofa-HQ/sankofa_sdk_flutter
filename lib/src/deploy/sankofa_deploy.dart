@@ -194,6 +194,13 @@ class SankofaDeploy implements SankofaModule {
   final SankofaDeployOptions options;
   bool _ready = false;
 
+  /// True when the legacy native (Android libapp.so) updater half
+  /// initialized. iOS Path-C apps stay false by design — the KBC
+  /// pipeline (fetchAndApplyKbcPatch / tryApplyStagedKbcPatch) never
+  /// needs the native plugin. Exposed so the bootstrap can decide
+  /// which startup auto-check to drive (native vs KBC).
+  bool get nativeUpdaterReady => _ready;
+
   /// True when the native Deploy plugin isn't present in this build — the
   /// expected, benign case under plain `flutter run` (the native baseline
   /// ships via the Sankofa CLI build / fork engine) and on iOS (Path C is
@@ -297,16 +304,16 @@ class SankofaDeploy implements SankofaModule {
     return const String.fromEnvironment('SANKOFA_FLAVOR');
   }
 
+  /// Resolves to '' when no engineVersion is in scope (explicit arg →
+  /// SankofaDeployOptions → sankofa.yaml via bootstrap). MUST stay
+  /// lenient: sankofa.yaml only carries engine_version after
+  /// `sankofa engine install`, and the startup auto-fetch runs inside a
+  /// fire-and-forget that release builds swallow silently — a throw
+  /// here disables OTA for the app's lifetime with zero diagnostics.
+  /// The check endpoint treats a missing engine_version as a wildcard.
   String _resolveEngineVersion(String? explicit) {
     if (explicit != null && explicit.isNotEmpty) return explicit;
-    final fromOptions = options.engineVersion;
-    if (fromOptions != null && fromOptions.isNotEmpty) return fromOptions;
-    throw StateError(
-      'Sankofa.deploy: no engineVersion in scope. Set engineVersion on '
-      'SankofaDeployOptions at init time (or via Sankofa.bootstrap, '
-      'which reads it from sankofa.yaml) OR pass it directly to the '
-      'check / download / fetch call.',
-    );
+    return options.engineVersion ?? '';
   }
 
   String _resolveEndpoint(String? explicit) {
@@ -933,6 +940,17 @@ class SankofaDeploy implements SankofaModule {
     final patchPath = await _kbcSlotPath(_kbcSlotActive);
     if (!File(patchPath).existsSync()) return null;
 
+    // STALE-BASE GATE. A staged envelope outlives the binary it was built
+    // for: the app's data container survives an App Store update, so a patch
+    // staged against version X is still sitting here when the user launches
+    // version Y. Its bytecode was compiled against X's base kernel, so
+    // transplanting it into Y is undefined — in practice a boot crash. The
+    // rollback gate below WOULD eventually catch that, but only after
+    // crashing the user repeatedly. A patch that cannot possibly belong to
+    // this binary must never be applied even once: drop it and let the
+    // startup fetch pull the one built for this version.
+    if (!await _discardStagedPatchIfWrongBinary(patchPath)) return null;
+
     // Rollback gate (time-window model — RN parity). Counts a boot as
     // a "crash" only if the previous boot didn't confirm healthy AND
     // was within kKbcCrashWindow. Two such consecutive crashes trip
@@ -1207,6 +1225,63 @@ class SankofaDeploy implements SankofaModule {
       bundleLabel: label,
     ));
     return true;
+  }
+
+  /// Guard a staged envelope against the binary it is about to be applied to.
+  ///
+  /// Returns true when the caller should go on to apply it, false when the
+  /// envelope was built for a DIFFERENT app version and has been discarded
+  /// (both slots — a stale last_good must not be restored over it either).
+  ///
+  /// Fails OPEN: if the envelope carries no `targetBinaryVersion`, or this
+  /// app's version can't be resolved, we apply exactly as before. The gate
+  /// only ever fires on a positive mismatch, so it cannot break a working
+  /// setup — it only refuses a patch that provably belongs to another build.
+  Future<bool> _discardStagedPatchIfWrongBinary(String patchPath) async {
+    String? staleLabel;
+    try {
+      final bytes = await File(patchPath).readAsBytes();
+      final parsed = parseKbcEnvelope(bytes);
+      final target = parsed.metadata['targetBinaryVersion']?.toString();
+      staleLabel = parsed.metadata['label']?.toString();
+      if (target == null || target.isEmpty) return true; // pre-metadata patch
+      final current = _resolveAppVersionOrNull();
+      if (current == null || current.isEmpty) return true; // unknown → apply
+      if (target == current) return true; // the common case
+    } catch (_) {
+      // Unparseable envelope — leave it to the existing apply path, which
+      // already reports + quarantines a bad file.
+      return true;
+    }
+
+    // Positive mismatch: this patch belongs to another binary.
+    try {
+      await File(patchPath).delete();
+    } catch (_) {/* best-effort */}
+    try {
+      final lastGood = await _kbcSlotPath(_kbcSlotLastGood);
+      if (File(lastGood).existsSync()) await File(lastGood).delete();
+    } catch (_) {/* best-effort */}
+    if (kDebugMode) {
+      debugPrint(
+        '[Sankofa.deploy] discarded staged patch "$staleLabel" — built for app '
+        'version other than ${_resolveAppVersionOrNull()}. The startup check '
+        'will fetch the patch for this version.',
+      );
+    }
+    unawaited(_reportKbcEvent(
+      eventType: 'kbc_staged_patch_discarded_version_mismatch',
+      bundleLabel: staleLabel,
+      appVersion: _resolveAppVersionOrNull(),
+    ));
+    return false;
+  }
+
+  /// This app's version, or null when it isn't in scope (test/web hosts).
+  /// Mirrors [_resolveAppVersion] without its throw.
+  String? _resolveAppVersionOrNull() {
+    final v = _defaultAppVersion;
+    return (v == null || v.isEmpty) ? null : v;
   }
 
   /// Move last_good/patch.skdp → active/patch.skdp. Called by the
@@ -1485,10 +1560,14 @@ class SankofaDeploy implements SankofaModule {
   Future<void> shutdown() async {
     _autoConfirmTimer?.cancel();
     _autoConfirmTimer = null;
+    // Drop the singleton unconditionally. On iOS / plain `flutter run` the
+    // platform plugin never came up (_ready stays false), but the instance
+    // is still published — an early return here would leave a disposed
+    // Sankofa pointing at a stale deploy.
+    _instance = null;
     if (!_ready) return;
     await SankofaDeployPlatform.instance.shutdown();
     _ready = false;
-    _instance = null;
   }
 
   /// Self-audit the host's Deploy integration. Returns a structured

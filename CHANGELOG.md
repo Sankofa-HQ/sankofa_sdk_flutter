@@ -3,6 +3,32 @@
 ## 0.2.10 — Deploy: crash → auto-rollback boot-guard (Android)
 
 ### Fixed
+- **A staged patch built for a different app version is discarded, not
+  applied.** The app's data container survives a store update, so a patch
+  staged under v1.0 was still on disk when v1.1 launched — and the boot apply
+  never checked the envelope's `targetBinaryVersion`, transplanting bytecode
+  compiled against the old base kernel into the new binary (boot crash; the
+  crash-window rollback rescued the device only after ~2–3 crashes, and the
+  crash loop starved the startup fetch so the correct patch never arrived).
+  `tryApplyStagedKbcPatch` now discards a provably-foreign envelope before the
+  crash machinery ever sees it (both slots — a stale `last_good` is dropped
+  too), reports `kbc_staged_patch_discarded_version_mismatch`, and lets the
+  startup check fetch the patch built for this binary. Fails open: envelopes
+  without `targetBinaryVersion` and hosts without an app version in scope
+  behave exactly as before. Verified on-device (iPhone, release AOT): planted
+  stale envelope → discarded on launch 1, correct patch fetched + applied on
+  launch 2, zero crashes, no label banned.
+- **Startup auto-fetch no longer dies silently when `sankofa.yaml` has no
+  `engine_version`.** `_resolveEngineVersion` threw a `StateError` inside the
+  fire-and-forget startup check — invisible in release builds — permanently
+  disabling OTA for any app whose yaml predates `sankofa engine install`. A
+  missing engine version now simply omits the `engine_version` query param,
+  which the server treats as a wildcard.
+- **`shutdown()` always releases the singleton.** On hosts where the platform
+  plugin never initialized (iOS, plain `flutter run`) it returned early and
+  left the disposed instance published.
+
+### Fixed (Android boot-guard)
 - **A bad patch can no longer boot-loop the app.** New native
   `SankofaBootGuard`: every boot that hands an OTA patch to the engine is
   counted before Dart starts; the first MethodChannel call from Dart marks the

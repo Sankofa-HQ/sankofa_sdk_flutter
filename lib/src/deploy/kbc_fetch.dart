@@ -125,7 +125,10 @@ Future<SankofaUpdateCheckResult> checkForKbcUpdate({
     'app_version': appVersion,
     'distinct_id': distinctId,
     'platform': platform,
-    'engine_version': engineVersion,
+    // Empty = unknown (sankofa.yaml without engine_version) — omit so
+    // the server applies its missing-engine wildcard instead of
+    // matching releases against the literal empty string.
+    if (engineVersion.isNotEmpty) 'engine_version': engineVersion,
     'runtime': 'flutter-code',
     if (currentLabel != null) 'current_bundle_label': currentLabel,
     // Flavor scopes the patch per product flavor (empty = wildcard, so
@@ -373,7 +376,10 @@ Future<KbcFetchResult> fetchAndApplyKbcPatch({
     'app_version': appVersion,
     'distinct_id': distinctId,
     'platform': platform,
-    'engine_version': engineVersion,
+    // Empty = unknown (sankofa.yaml without engine_version) — omit so
+    // the server applies its missing-engine wildcard instead of
+    // matching releases against the literal empty string.
+    if (engineVersion.isNotEmpty) 'engine_version': engineVersion,
     // Force runtime=flutter-code so a project that publishes both RN
     // and Flutter Code releases for this app version doesn't accidentally
     // hand us an RN OTA bundle (which our envelope parser would reject

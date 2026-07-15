@@ -1,3 +1,5 @@
+import 'dart:async' show unawaited;
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
@@ -227,6 +229,40 @@ class SankofaBootstrap {
             }
           });
         });
+      }
+
+      // Startup auto-check, KBC edition. `autoCheckOnStartup` (default
+      // true) historically only drove the ANDROID-native libapp check —
+      // on iOS the native plugin never comes up (`nativeUpdaterReady`
+      // stays false), so patches NEVER arrived automatically: the app
+      // had to hand-wire checkForUpdate()/downloadUpdate(), which the
+      // `sankofa init --deploy` template does not do. Drive the cross-
+      // platform KBC fetch+stage here for exactly those hosts. Fire and
+      // forget: a slow network must never block first frame; the fetch
+      // verifies sha + Ed25519 and stages to disk, and the NEXT boot's
+      // tryApplyStagedKbcPatch (above) applies it.
+      final deploy = Sankofa.instance.deploy;
+      if (deploy != null &&
+          effectiveDeployOptions.autoCheckOnStartup &&
+          !deploy.nativeUpdaterReady) {
+        unawaited(() async {
+          try {
+            final result =
+                await deploy.fetchAndApplyKbcPatch(loader: options.loader!);
+            if (kDebugMode) {
+              debugPrint(
+                '[Sankofa.bootstrap] startup KBC check: '
+                'hasUpdate=${result.hasUpdate} label=${result.label ?? '-'}',
+              );
+            }
+          } catch (e) {
+            // Non-fatal by contract — offline/airplane-mode launches are
+            // normal. The next launch retries.
+            if (kDebugMode) {
+              debugPrint('[Sankofa.bootstrap] startup KBC check failed: $e');
+            }
+          }
+        }());
       }
     }
 
