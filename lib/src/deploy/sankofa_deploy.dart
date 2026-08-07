@@ -1129,13 +1129,19 @@ class SankofaDeploy implements SankofaModule {
       _armAutoConfirmTimer();
       return result;
     } on KbcApplyException catch (err) {
-      if (kDebugMode) {
-        debugPrint(
-          '[Sankofa.deploy] staged patch at $patchPath failed to apply: ${err.message}'
-          '${err.cause != null ? '\n[Sankofa.deploy] cause: ${err.cause}' : ''}'
-          '${err.causeStackTrace != null ? '\n[Sankofa.deploy] cause stack:\n${err.causeStackTrace}' : ''}',
-        );
-      }
+      // Logged in EVERY build mode, deliberately. A refused apply is silent by
+      // construction: the app carries on running unpatched code, so nothing on
+      // screen says the patch didn't take. Gating this on kDebugMode made it
+      // unobservable exactly where it matters — KBC only applies in AOT
+      // (release/profile) builds, and a debug build cannot apply a patch at
+      // all, so the one mode that printed the reason was the one that could
+      // never produce it. The only remaining channel was a server-side event
+      // no API exposes.
+      debugPrint(
+        '[Sankofa.deploy] staged patch at $patchPath failed to apply: ${err.message}'
+        '${err.cause != null ? '\n[Sankofa.deploy] cause: ${err.cause}' : ''}'
+        '${err.causeStackTrace != null ? '\n[Sankofa.deploy] cause stack:\n${err.causeStackTrace}' : ''}',
+      );
       final stack = _formatKbcStackTrace(err.causeStackTrace);
       unawaited(_reportKbcEvent(
         eventType: 'kbc_boot_apply_failed',
@@ -1151,11 +1157,10 @@ class SankofaDeploy implements SankofaModule {
       ));
       return null;
     } catch (err, st) {
-      if (kDebugMode) {
-        debugPrint(
-          '[Sankofa.deploy] unexpected error applying staged patch at $patchPath: $err',
-        );
-      }
+      // See above — apply failures are reported in all build modes.
+      debugPrint(
+        '[Sankofa.deploy] unexpected error applying staged patch at $patchPath: $err',
+      );
       final stack = _formatKbcStackTrace(st);
       unawaited(_reportKbcEvent(
         eventType: 'kbc_boot_apply_failed',
