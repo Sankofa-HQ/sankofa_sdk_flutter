@@ -893,6 +893,50 @@ class SankofaDeploy implements SankofaModule {
     return Directory('${docsDir.path}/sankofa-deploy/patches/$slot');
   }
 
+  /// Consecutive boots that attempted this patch and never confirmed healthy.
+  ///
+  /// This lives in a FILE, written synchronously BEFORE the apply, because the
+  /// failure it guards against is a hard crash. SharedPreferences writes go to
+  /// NSUserDefaults asynchronously, so a patch that SIGABRTs the process inside
+  /// `loadDynamicModule` kills the app before the counter is ever flushed — the
+  /// count stays 0 forever, the threshold is never reached, and the auto-rollback
+  /// that exists precisely for crashing patches can never fire. Observed: a
+  /// crashing patch left the app unlaunchable indefinitely, with no `crash_count`
+  /// key present at all.
+  Future<File> _kbcAttemptFile() async {
+    final docsDir = await getApplicationDocumentsDirectory();
+    return File('${docsDir.path}/sankofa-deploy/patches/apply_attempts');
+  }
+
+  Future<int> _readApplyAttempts() async {
+    try {
+      final f = await _kbcAttemptFile();
+      if (!f.existsSync()) return 0;
+      return int.tryParse(f.readAsStringSync().trim()) ?? 0;
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  /// Synchronous + flushed: this must be on disk before the apply runs, or it
+  /// cannot survive the crash it is counting.
+  Future<void> _writeApplyAttempts(int n) async {
+    try {
+      final f = await _kbcAttemptFile();
+      f.parent.createSync(recursive: true);
+      f.writeAsStringSync('$n', flush: true);
+    } catch (_) {
+      // Best effort — a guard that throws is worse than one that under-counts.
+    }
+  }
+
+  Future<void> _clearApplyAttempts() async {
+    try {
+      final f = await _kbcAttemptFile();
+      if (f.existsSync()) f.deleteSync();
+    } catch (_) {}
+  }
+
   /// Legacy boot-count threshold (pre-time-window). Kept as a public
   /// const for API stability — the new model uses [kKbcCrashThreshold]
   /// + [kKbcCrashWindow].
@@ -964,21 +1008,27 @@ class SankofaDeploy implements SankofaModule {
       await prefs.remove(_kbcBootCounterKey);
     }
 
-    final lastBootMs = prefs.getInt(_kbcLastBootTimeMsKey);
     final lastBootConfirmed = prefs.getBool(_kbcBootConfirmedKey) ?? false;
     int crashCount = prefs.getInt(_kbcCrashCountKey) ?? 0;
 
-    final previousBootCrashed = !lastBootConfirmed &&
-        lastBootMs != null &&
-        (nowMs - lastBootMs) < kKbcCrashWindow.inMilliseconds;
-
-    if (previousBootCrashed) {
-      crashCount += 1;
-      await prefs.setInt(_kbcCrashCountKey, crashCount);
-    } else if (lastBootConfirmed) {
-      // Clean reset on any healthy prior boot.
-      crashCount = 0;
+    // Consecutive unconfirmed apply attempts, from the on-disk sentinel. Two
+    // deliberate differences from the old prefs+window model:
+    //
+    //  - it survives SIGABRT, which the prefs counter did not, so a patch that
+    //    crashes the app is actually caught;
+    //  - it does not require the relaunches to fall inside kKbcCrashWindow. A
+    //    user who opens a crashing app, gives up, and tries again a minute
+    //    later was never counted as a crash loop and so never got the rollback
+    //    — which is the normal way a person meets a broken app.
+    //
+    // kKbcCrashWindow is retained only for the legacy prefs bookkeeping below,
+    // which is now reporting, not decision-making.
+    final attempts = await _readApplyAttempts();
+    crashCount = attempts;
+    if (lastBootConfirmed && attempts == 0) {
       await prefs.setInt(_kbcCrashCountKey, 0);
+    } else {
+      await prefs.setInt(_kbcCrashCountKey, attempts);
     }
 
     if (crashCount >= kKbcCrashThreshold) {
@@ -1010,6 +1060,8 @@ class SankofaDeploy implements SankofaModule {
         final disabledPath =
             '${disabledDir.path}/patch.skdp.disabled-${DateTime.now().millisecondsSinceEpoch}';
         await File(patchPath).rename(disabledPath);
+        // The patch is gone; the count must not carry over to its replacement.
+        await _clearApplyAttempts();
         if (kDebugMode) {
           debugPrint(
             '[Sankofa.deploy] AUTO-ROLLBACK: staged patch "$rolledBackLabel" '
@@ -1056,6 +1108,9 @@ class SankofaDeploy implements SankofaModule {
     // calls notifyKbcPatchReady() or the 10s auto-confirm timer fires.
     await prefs.setInt(_kbcLastBootTimeMsKey, nowMs);
     await prefs.setBool(_kbcBootConfirmedKey, false);
+    // On disk, flushed, BEFORE the apply — the next boot must be able to see
+    // this attempt even if the apply aborts the process mid-flight.
+    await _writeApplyAttempts(attempts + 1);
 
     try {
       final result = await kbc_loader.applyKbcEnvelopeFromFile(
@@ -1157,6 +1212,8 @@ class SankofaDeploy implements SankofaModule {
     final p = prefs ?? await SharedPreferences.getInstance();
     await p.setBool(_kbcBootConfirmedKey, true);
     await p.setInt(_kbcCrashCountKey, 0);
+    // Healthy boot — the attempt sentinel has served its purpose.
+    await _clearApplyAttempts();
     // Clean legacy key if a migration didn't catch it earlier.
     if (p.containsKey(_kbcBootCounterKey)) {
       await p.remove(_kbcBootCounterKey);
