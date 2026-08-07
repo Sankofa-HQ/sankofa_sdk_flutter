@@ -1337,12 +1337,15 @@ class SankofaDeploy implements SankofaModule {
   /// app's version can't be resolved, we apply exactly as before. The gate
   /// only ever fires on a positive mismatch, so it cannot break a working
   /// setup — it only refuses a patch that provably belongs to another build.
+  String? _lastDiscardTarget;
+
   Future<bool> _discardStagedPatchIfWrongBinary(String patchPath) async {
     String? staleLabel;
     try {
       final bytes = await File(patchPath).readAsBytes();
       final parsed = parseKbcEnvelope(bytes);
       final target = parsed.metadata['targetBinaryVersion']?.toString();
+      _lastDiscardTarget = target;
       staleLabel = parsed.metadata['label']?.toString();
       if (target == null || target.isEmpty) return true; // pre-metadata patch
       final current = _resolveAppVersionOrNull();
@@ -1355,6 +1358,21 @@ class SankofaDeploy implements SankofaModule {
     }
 
     // Positive mismatch: this patch belongs to another binary.
+    //
+    // Record it where a developer can see it. This path deletes the staged
+    // patch and returns before the apply, so it leaves NO local trace: no
+    // attempt sentinel, no apply error, just a patch that keeps re-downloading
+    // and never runs. The server event alone is not reachable without a raw
+    // ClickHouse query, and the exact strings being compared are what matters —
+    // "1.0.4" vs "1.0.4+6" fails `==` while meaning the same build to a human.
+    await _writeLastApplyError(
+      'staged patch discarded — version mismatch.\n'
+      '  patch targetBinaryVersion: ${_lastDiscardTarget ?? '(unknown)'}\n'
+      '  running app version:       ${_resolveAppVersionOrNull() ?? '(unknown)'}\n'
+      '  label:                     ${staleLabel ?? '(unknown)'}\n'
+      'The patch was deleted; the next check will fetch the one built for this '
+      'version. If these two look equivalent to you, that is the bug.',
+    );
     try {
       await File(patchPath).delete();
     } catch (_) {/* best-effort */}
