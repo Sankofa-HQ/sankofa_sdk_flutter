@@ -930,6 +930,28 @@ class SankofaDeploy implements SankofaModule {
     }
   }
 
+  /// Last apply failure, written next to the patch so it can be READ.
+  ///
+  /// debugPrint is not enough on iOS: a release build's Dart stdout does not
+  /// reach `devicectl --console`, Console.app, or any crash report, so the
+  /// reason a patch was refused is invisible on the one platform where patches
+  /// apply. The event goes to the server too, but no API exposes it — the only
+  /// way to read it was SSH + a raw ClickHouse query. A file in the app
+  /// container can be pulled with
+  ///   xcrun devicectl device copy from --domain-type appDataContainer …
+  /// which is the difference between a five-minute diagnosis and an evening.
+  Future<void> _writeLastApplyError(String message) async {
+    try {
+      final docsDir = await getApplicationDocumentsDirectory();
+      final f = File('${docsDir.path}/sankofa-deploy/patches/last_apply_error.txt');
+      f.parent.createSync(recursive: true);
+      f.writeAsStringSync(
+        '${DateTime.now().toIso8601String()}\n$message\n',
+        flush: true,
+      );
+    } catch (_) {}
+  }
+
   Future<void> _clearApplyAttempts() async {
     try {
       final f = await _kbcAttemptFile();
@@ -1142,6 +1164,10 @@ class SankofaDeploy implements SankofaModule {
         '${err.cause != null ? '\n[Sankofa.deploy] cause: ${err.cause}' : ''}'
         '${err.causeStackTrace != null ? '\n[Sankofa.deploy] cause stack:\n${err.causeStackTrace}' : ''}',
       );
+      await _writeLastApplyError(
+        'KbcApplyException: ${err.message}'
+        '${err.cause != null ? '\ncause: ${err.cause}' : ''}',
+      );
       final stack = _formatKbcStackTrace(err.causeStackTrace);
       unawaited(_reportKbcEvent(
         eventType: 'kbc_boot_apply_failed',
@@ -1161,6 +1187,7 @@ class SankofaDeploy implements SankofaModule {
       debugPrint(
         '[Sankofa.deploy] unexpected error applying staged patch at $patchPath: $err',
       );
+      await _writeLastApplyError('unexpected error: $err');
       final stack = _formatKbcStackTrace(st);
       unawaited(_reportKbcEvent(
         eventType: 'kbc_boot_apply_failed',
