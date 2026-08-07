@@ -952,6 +952,14 @@ class SankofaDeploy implements SankofaModule {
     } catch (_) {}
   }
 
+  Future<void> _clearLastApplyError() async {
+    try {
+      final docsDir = await getApplicationDocumentsDirectory();
+      final f = File('${docsDir.path}/sankofa-deploy/patches/last_apply_error.txt');
+      if (f.existsSync()) f.deleteSync();
+    } catch (_) {}
+  }
+
   Future<void> _clearApplyAttempts() async {
     try {
       final f = await _kbcAttemptFile();
@@ -1144,6 +1152,9 @@ class SankofaDeploy implements SankofaModule {
         eventType: 'kbc_boot_apply_success',
         bundleLabel: result.metadata['label']?.toString(),
       ));
+      // A previous failure's note must not outlive the failure — a stale
+      // last_apply_error.txt reads as a current problem to whoever pulls it.
+      await _clearLastApplyError();
       // Arm the 10s auto-confirm safety net (RN parity). If the host
       // never calls notifyKbcPatchReady, we'll auto-ack so a clean
       // 10-second-old app session is treated as proof the patch is
