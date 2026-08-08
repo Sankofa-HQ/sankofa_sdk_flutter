@@ -1159,9 +1159,16 @@ class SankofaDeploy implements SankofaModule {
         eventType: 'kbc_boot_apply_success',
         bundleLabel: result.metadata['label']?.toString(),
       ));
-      // A previous failure's note must not outlive the failure — a stale
-      // last_apply_error.txt reads as a current problem to whoever pulls it.
-      await _clearLastApplyError();
+      // BREADCRUMB (temporary): write the loader's return value so we can
+      // observe on-device whether the engine actually EXECUTED the module
+      // entry point. The entry point returns 'SANKOFA_ENTRY_RAN'; if the
+      // engine loads the module but never runs the entry point, this will be
+      // null. This is the difference between "reroute is broken" and "the
+      // entry point never runs" — two very different bugs.
+      await _writeLastApplyError(
+        'APPLY OK. loader returnValue = ${result.returnValue}\n'
+        'label=${result.metadata['label']}',
+      );
       // Arm the 10s auto-confirm safety net (RN parity). If the host
       // never calls notifyKbcPatchReady, we'll auto-ack so a clean
       // 10-second-old app session is treated as proof the patch is
