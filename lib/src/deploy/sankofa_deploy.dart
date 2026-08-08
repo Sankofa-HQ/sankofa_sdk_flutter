@@ -619,6 +619,13 @@ class SankofaDeploy implements SankofaModule {
         bannedLabels: banned.isEmpty ? null : banned,
       );
     } catch (err, st) {
+      // Same reasoning as the boot-apply path: a failure here is otherwise
+      // invisible on device. The app keeps running unpatched, nothing appears
+      // on screen, and the only record is a server event no API exposes. This
+      // is the path a patch takes when it is fetched and applied in the same
+      // launch, so it is the one a developer hits first.
+      debugPrint('[Sankofa.deploy] fetch+apply failed: $err');
+      unawaited(_writeLastApplyError('fetch+apply failed: $err'));
       // Telemetry fire-and-forget. Don't await — preserve the original
       // throw timing for the host's UI feedback.
       final stack = err is KbcApplyException
