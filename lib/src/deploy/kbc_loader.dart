@@ -259,6 +259,24 @@ Future<KbcPatchResult> applyKbcEnvelope(
   try {
     returnValue = await loader(parsed.kbcPayload);
   } catch (err, st) {
+    // A dynamic module can be loaded only ONCE per isolate. If this exact
+    // patch was already transplanted earlier in the same launch — boot-apply
+    // ran it, then the fire-and-forget startup fetch re-applied the same
+    // active patch — the loader throws "... is already loaded". That is NOT a
+    // failure: the patch is live and its entry point already ran (and already
+    // wrote its result). Re-applying is a harmless no-op, so treat it as an
+    // idempotent success with a null returnValue. Callers gate their
+    // patch_result write on a non-null returnValue, so the value the first
+    // apply produced is preserved, and the crash-guard never records a phantom
+    // failure that would quarantine a perfectly good, live patch.
+    if (err.toString().contains('is already loaded')) {
+      return KbcPatchResult(
+        returnValue: null,
+        metadata: parsed.metadata,
+        kbcSize: parsed.kbcPayload.length,
+        envelopeSize: parsed.totalSize,
+      );
+    }
     throw KbcApplyException(
       'loader threw — could be the running Flutter engine was NOT built '
       'with dart_dynamic_modules=true (the Sankofa β.1 engine fork — '
