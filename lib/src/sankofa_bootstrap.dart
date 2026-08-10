@@ -157,6 +157,13 @@ class SankofaBootstrap {
     // signing_pubkey is written by `sankofa keys generate` and never
     // edited by hand — customer doesn't need to know it exists.
     final signingPubkey = config['signing_pubkey']?.trim();
+    // Product flavor (dev / staging / production). Read from sankofa.yaml so
+    // the app's runtime flavor is decoupled from the build's SANKOFA_FLAVOR
+    // dart-define: the CLI writes this same key into the release record, so the
+    // flavor the app REPORTS and the flavor the server SCOPES releases by stay
+    // in lockstep even when the store binary was built without --flavor. Empty
+    // here → init() falls back to the SANKOFA_FLAVOR dart-define.
+    final flavor = config['flavor']?.trim();
 
     if (apiKey.isEmpty && kDebugMode) {
       debugPrint(
@@ -195,6 +202,10 @@ class SankofaBootstrap {
       debug: options.debug,
       enableDeploy: enableDeploy,
       deployOptions: effectiveDeployOptions,
+      // Product flavor from sankofa.yaml (empty → null so init() falls back to
+      // the SANKOFA_FLAVOR dart-define). Ensures a bootstrap-based app reports
+      // its flavor so the server only ever serves it same-flavor patches.
+      flavor: (flavor != null && flavor.isNotEmpty) ? flavor : null,
       // Respect overrides; otherwise leave init() defaults alone.
       enableCatch: options.enableCatch ?? true,
       enableAnalytics: options.enableAnalytics ?? true,
