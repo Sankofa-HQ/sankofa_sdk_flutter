@@ -28,6 +28,7 @@
 // call into `loadDynamicModule`.
 
 import 'dart:io' show File, Platform;
+import 'package:flutter/foundation.dart' show debugPrint;
 import 'dart:typed_data';
 
 import 'kbc_envelope.dart';
@@ -123,12 +124,29 @@ String? _engineCompatError(Map<String, dynamic> metadata) {
   // refuse to even attempt the apply if it's missing — unless the
   // SANKOFA_SKIP_ENGINE_CHECK dart-define is set (dev/test escape hatch
   // while the Dart SDK fork hasn't stamped its version yet).
+  // The `+sankofa-` marker is NOT a reliable test and must not refuse an apply.
+  //
+  // Platform.version reports the bundled DART SDK version; the fork identity
+  // lives on the ENGINE (FLUTTER_ENGINE_VERSION, which the engine itself logs
+  // as `<sha>+sankofa-N (Sankofa fork)` at startup). The fork does not stamp
+  // tools/VERSION, so a correctly forked engine reports a plain Dart version —
+  // e.g. "3.12.1 (stable) … on \"ios_arm64\"" — and this check refused every
+  // patch on it. Every customer then had to carry
+  // --dart-define=SANKOFA_SKIP_ENGINE_CHECK=1 forever, and anyone who didn't
+  // know that got patches that downloaded, staged, and silently never applied.
+  //
+  // Whether the engine can load a dynamic module is a CAPABILITY, and the
+  // capability is already tested where it matters: the loader call below throws
+  // on stock Flutter ("Loading of dynamic modules is not supported") and its
+  // catch already explains exactly that. Testing the real thing beats sniffing
+  // a version string that means something else.
   if (!_skipEngineCheck && !platformVersion.contains('+sankofa-')) {
-    return 'running engine is not a Sankofa fork build '
-        '(Platform.version = "$platformVersion" — expected to contain '
-        '"+sankofa-N"). KBC patches will not load on stock Flutter. '
-        'If your engine IS forked but Dart version is unstamped, rebuild '
-        'with --dart-define=SANKOFA_SKIP_ENGINE_CHECK=1.';
+    debugPrint(
+      '[Sankofa.deploy] note: Platform.version ("$platformVersion") carries no '
+      '"+sankofa-N" marker. That is expected on a forked engine whose Dart SDK '
+      'is unstamped, and is not by itself a problem — if the engine is genuinely '
+      'stock, the loader below will say so.',
+    );
   }
   // Compare envelope's dartVersion to the engine's Dart minor.
   // Envelope dartVersion typically comes back as just "3.11.5";

@@ -543,6 +543,28 @@ Future<KbcFetchResult> fetchAndApplyKbcPatch({
     );
   }
 
+  // BREADCRUMB (temporary): observe the PATCH's entry-point return value. This
+  // is the fetch-then-apply path — the one a fresh patch actually takes. If the
+  // engine runs the patch module's entry point, returnValue is the sentinel the
+  // extractor emits ('SANKOFA_ENTRY_RAN'); the baseline path returns
+  // 'sankofa-baseline-<ver>'. Written to a readable file, no plugin needed.
+  try {
+    final dd = await getApplicationDocumentsDirectory();
+    File('${dd.path}/sankofa-deploy/patches/fetch_apply_breadcrumb.txt')
+        .writeAsStringSync(
+      'FETCH-APPLY OK. label=$label returnValue=${applied.returnValue}',
+      flush: true,
+    );
+    // The patch's return value, alone, for the host to consume. This is the
+    // supported channel: a pure patched function returns a value, applyKbcEnvelope
+    // surfaces it, and the host reads it here — no in-module I/O required (which
+    // aborts on load) and no reliance on the method reroute (which does not fire).
+    if (applied.returnValue != null) {
+      File('${dd.path}/sankofa-deploy/patch_result.txt')
+          .writeAsStringSync(applied.returnValue.toString(), flush: true);
+    }
+  } catch (_) {}
+
   return KbcFetchResult(
     hasUpdate: true,
     applied: applied,

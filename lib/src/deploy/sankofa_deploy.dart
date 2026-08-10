@@ -619,6 +619,13 @@ class SankofaDeploy implements SankofaModule {
         bannedLabels: banned.isEmpty ? null : banned,
       );
     } catch (err, st) {
+      // Same reasoning as the boot-apply path: a failure here is otherwise
+      // invisible on device. The app keeps running unpatched, nothing appears
+      // on screen, and the only record is a server event no API exposes. This
+      // is the path a patch takes when it is fetched and applied in the same
+      // launch, so it is the one a developer hits first.
+      debugPrint('[Sankofa.deploy] fetch+apply failed: $err');
+      unawaited(_writeLastApplyError('fetch+apply failed: $err'));
       // Telemetry fire-and-forget. Don't await — preserve the original
       // throw timing for the host's UI feedback.
       final stack = err is KbcApplyException
@@ -893,6 +900,80 @@ class SankofaDeploy implements SankofaModule {
     return Directory('${docsDir.path}/sankofa-deploy/patches/$slot');
   }
 
+  /// Consecutive boots that attempted this patch and never confirmed healthy.
+  ///
+  /// This lives in a FILE, written synchronously BEFORE the apply, because the
+  /// failure it guards against is a hard crash. SharedPreferences writes go to
+  /// NSUserDefaults asynchronously, so a patch that SIGABRTs the process inside
+  /// `loadDynamicModule` kills the app before the counter is ever flushed — the
+  /// count stays 0 forever, the threshold is never reached, and the auto-rollback
+  /// that exists precisely for crashing patches can never fire. Observed: a
+  /// crashing patch left the app unlaunchable indefinitely, with no `crash_count`
+  /// key present at all.
+  Future<File> _kbcAttemptFile() async {
+    final docsDir = await getApplicationDocumentsDirectory();
+    return File('${docsDir.path}/sankofa-deploy/patches/apply_attempts');
+  }
+
+  Future<int> _readApplyAttempts() async {
+    try {
+      final f = await _kbcAttemptFile();
+      if (!f.existsSync()) return 0;
+      return int.tryParse(f.readAsStringSync().trim()) ?? 0;
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  /// Synchronous + flushed: this must be on disk before the apply runs, or it
+  /// cannot survive the crash it is counting.
+  Future<void> _writeApplyAttempts(int n) async {
+    try {
+      final f = await _kbcAttemptFile();
+      f.parent.createSync(recursive: true);
+      f.writeAsStringSync('$n', flush: true);
+    } catch (_) {
+      // Best effort — a guard that throws is worse than one that under-counts.
+    }
+  }
+
+  /// Last apply failure, written next to the patch so it can be READ.
+  ///
+  /// debugPrint is not enough on iOS: a release build's Dart stdout does not
+  /// reach `devicectl --console`, Console.app, or any crash report, so the
+  /// reason a patch was refused is invisible on the one platform where patches
+  /// apply. The event goes to the server too, but no API exposes it — the only
+  /// way to read it was SSH + a raw ClickHouse query. A file in the app
+  /// container can be pulled with
+  ///   xcrun devicectl device copy from --domain-type appDataContainer …
+  /// which is the difference between a five-minute diagnosis and an evening.
+  Future<void> _writeLastApplyError(String message) async {
+    try {
+      final docsDir = await getApplicationDocumentsDirectory();
+      final f = File('${docsDir.path}/sankofa-deploy/patches/last_apply_error.txt');
+      f.parent.createSync(recursive: true);
+      f.writeAsStringSync(
+        '${DateTime.now().toIso8601String()}\n$message\n',
+        flush: true,
+      );
+    } catch (_) {}
+  }
+
+  Future<void> _clearLastApplyError() async {
+    try {
+      final docsDir = await getApplicationDocumentsDirectory();
+      final f = File('${docsDir.path}/sankofa-deploy/patches/last_apply_error.txt');
+      if (f.existsSync()) f.deleteSync();
+    } catch (_) {}
+  }
+
+  Future<void> _clearApplyAttempts() async {
+    try {
+      final f = await _kbcAttemptFile();
+      if (f.existsSync()) f.deleteSync();
+    } catch (_) {}
+  }
+
   /// Legacy boot-count threshold (pre-time-window). Kept as a public
   /// const for API stability — the new model uses [kKbcCrashThreshold]
   /// + [kKbcCrashWindow].
@@ -964,21 +1045,27 @@ class SankofaDeploy implements SankofaModule {
       await prefs.remove(_kbcBootCounterKey);
     }
 
-    final lastBootMs = prefs.getInt(_kbcLastBootTimeMsKey);
     final lastBootConfirmed = prefs.getBool(_kbcBootConfirmedKey) ?? false;
     int crashCount = prefs.getInt(_kbcCrashCountKey) ?? 0;
 
-    final previousBootCrashed = !lastBootConfirmed &&
-        lastBootMs != null &&
-        (nowMs - lastBootMs) < kKbcCrashWindow.inMilliseconds;
-
-    if (previousBootCrashed) {
-      crashCount += 1;
-      await prefs.setInt(_kbcCrashCountKey, crashCount);
-    } else if (lastBootConfirmed) {
-      // Clean reset on any healthy prior boot.
-      crashCount = 0;
+    // Consecutive unconfirmed apply attempts, from the on-disk sentinel. Two
+    // deliberate differences from the old prefs+window model:
+    //
+    //  - it survives SIGABRT, which the prefs counter did not, so a patch that
+    //    crashes the app is actually caught;
+    //  - it does not require the relaunches to fall inside kKbcCrashWindow. A
+    //    user who opens a crashing app, gives up, and tries again a minute
+    //    later was never counted as a crash loop and so never got the rollback
+    //    — which is the normal way a person meets a broken app.
+    //
+    // kKbcCrashWindow is retained only for the legacy prefs bookkeeping below,
+    // which is now reporting, not decision-making.
+    final attempts = await _readApplyAttempts();
+    crashCount = attempts;
+    if (lastBootConfirmed && attempts == 0) {
       await prefs.setInt(_kbcCrashCountKey, 0);
+    } else {
+      await prefs.setInt(_kbcCrashCountKey, attempts);
     }
 
     if (crashCount >= kKbcCrashThreshold) {
@@ -1010,6 +1097,8 @@ class SankofaDeploy implements SankofaModule {
         final disabledPath =
             '${disabledDir.path}/patch.skdp.disabled-${DateTime.now().millisecondsSinceEpoch}';
         await File(patchPath).rename(disabledPath);
+        // The patch is gone; the count must not carry over to its replacement.
+        await _clearApplyAttempts();
         if (kDebugMode) {
           debugPrint(
             '[Sankofa.deploy] AUTO-ROLLBACK: staged patch "$rolledBackLabel" '
@@ -1056,6 +1145,9 @@ class SankofaDeploy implements SankofaModule {
     // calls notifyKbcPatchReady() or the 10s auto-confirm timer fires.
     await prefs.setInt(_kbcLastBootTimeMsKey, nowMs);
     await prefs.setBool(_kbcBootConfirmedKey, false);
+    // On disk, flushed, BEFORE the apply — the next boot must be able to see
+    // this attempt even if the apply aborts the process mid-flight.
+    await _writeApplyAttempts(attempts + 1);
 
     try {
       final result = await kbc_loader.applyKbcEnvelopeFromFile(
@@ -1067,6 +1159,16 @@ class SankofaDeploy implements SankofaModule {
         eventType: 'kbc_boot_apply_success',
         bundleLabel: result.metadata['label']?.toString(),
       ));
+      // BREADCRUMB (temporary): write the loader's return value so we can
+      // observe on-device whether the engine actually EXECUTED the module
+      // entry point. The entry point returns 'SANKOFA_ENTRY_RAN'; if the
+      // engine loads the module but never runs the entry point, this will be
+      // null. This is the difference between "reroute is broken" and "the
+      // entry point never runs" — two very different bugs.
+      await _writeLastApplyError(
+        'APPLY OK. loader returnValue = ${result.returnValue}\n'
+        'label=${result.metadata['label']}',
+      );
       // Arm the 10s auto-confirm safety net (RN parity). If the host
       // never calls notifyKbcPatchReady, we'll auto-ack so a clean
       // 10-second-old app session is treated as proof the patch is
@@ -1074,13 +1176,23 @@ class SankofaDeploy implements SankofaModule {
       _armAutoConfirmTimer();
       return result;
     } on KbcApplyException catch (err) {
-      if (kDebugMode) {
-        debugPrint(
-          '[Sankofa.deploy] staged patch at $patchPath failed to apply: ${err.message}'
-          '${err.cause != null ? '\n[Sankofa.deploy] cause: ${err.cause}' : ''}'
-          '${err.causeStackTrace != null ? '\n[Sankofa.deploy] cause stack:\n${err.causeStackTrace}' : ''}',
-        );
-      }
+      // Logged in EVERY build mode, deliberately. A refused apply is silent by
+      // construction: the app carries on running unpatched code, so nothing on
+      // screen says the patch didn't take. Gating this on kDebugMode made it
+      // unobservable exactly where it matters — KBC only applies in AOT
+      // (release/profile) builds, and a debug build cannot apply a patch at
+      // all, so the one mode that printed the reason was the one that could
+      // never produce it. The only remaining channel was a server-side event
+      // no API exposes.
+      debugPrint(
+        '[Sankofa.deploy] staged patch at $patchPath failed to apply: ${err.message}'
+        '${err.cause != null ? '\n[Sankofa.deploy] cause: ${err.cause}' : ''}'
+        '${err.causeStackTrace != null ? '\n[Sankofa.deploy] cause stack:\n${err.causeStackTrace}' : ''}',
+      );
+      await _writeLastApplyError(
+        'KbcApplyException: ${err.message}'
+        '${err.cause != null ? '\ncause: ${err.cause}' : ''}',
+      );
       final stack = _formatKbcStackTrace(err.causeStackTrace);
       unawaited(_reportKbcEvent(
         eventType: 'kbc_boot_apply_failed',
@@ -1096,11 +1208,11 @@ class SankofaDeploy implements SankofaModule {
       ));
       return null;
     } catch (err, st) {
-      if (kDebugMode) {
-        debugPrint(
-          '[Sankofa.deploy] unexpected error applying staged patch at $patchPath: $err',
-        );
-      }
+      // See above — apply failures are reported in all build modes.
+      debugPrint(
+        '[Sankofa.deploy] unexpected error applying staged patch at $patchPath: $err',
+      );
+      await _writeLastApplyError('unexpected error: $err');
       final stack = _formatKbcStackTrace(st);
       unawaited(_reportKbcEvent(
         eventType: 'kbc_boot_apply_failed',
@@ -1157,6 +1269,8 @@ class SankofaDeploy implements SankofaModule {
     final p = prefs ?? await SharedPreferences.getInstance();
     await p.setBool(_kbcBootConfirmedKey, true);
     await p.setInt(_kbcCrashCountKey, 0);
+    // Healthy boot — the attempt sentinel has served its purpose.
+    await _clearApplyAttempts();
     // Clean legacy key if a migration didn't catch it earlier.
     if (p.containsKey(_kbcBootCounterKey)) {
       await p.remove(_kbcBootCounterKey);
@@ -1237,12 +1351,15 @@ class SankofaDeploy implements SankofaModule {
   /// app's version can't be resolved, we apply exactly as before. The gate
   /// only ever fires on a positive mismatch, so it cannot break a working
   /// setup — it only refuses a patch that provably belongs to another build.
+  String? _lastDiscardTarget;
+
   Future<bool> _discardStagedPatchIfWrongBinary(String patchPath) async {
     String? staleLabel;
     try {
       final bytes = await File(patchPath).readAsBytes();
       final parsed = parseKbcEnvelope(bytes);
       final target = parsed.metadata['targetBinaryVersion']?.toString();
+      _lastDiscardTarget = target;
       staleLabel = parsed.metadata['label']?.toString();
       if (target == null || target.isEmpty) return true; // pre-metadata patch
       final current = _resolveAppVersionOrNull();
@@ -1255,6 +1372,21 @@ class SankofaDeploy implements SankofaModule {
     }
 
     // Positive mismatch: this patch belongs to another binary.
+    //
+    // Record it where a developer can see it. This path deletes the staged
+    // patch and returns before the apply, so it leaves NO local trace: no
+    // attempt sentinel, no apply error, just a patch that keeps re-downloading
+    // and never runs. The server event alone is not reachable without a raw
+    // ClickHouse query, and the exact strings being compared are what matters —
+    // "1.0.4" vs "1.0.4+6" fails `==` while meaning the same build to a human.
+    await _writeLastApplyError(
+      'staged patch discarded — version mismatch.\n'
+      '  patch targetBinaryVersion: ${_lastDiscardTarget ?? '(unknown)'}\n'
+      '  running app version:       ${_resolveAppVersionOrNull() ?? '(unknown)'}\n'
+      '  label:                     ${staleLabel ?? '(unknown)'}\n'
+      'The patch was deleted; the next check will fetch the one built for this '
+      'version. If these two look equivalent to you, that is the bug.',
+    );
     try {
       await File(patchPath).delete();
     } catch (_) {/* best-effort */}
