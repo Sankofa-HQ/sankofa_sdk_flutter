@@ -245,15 +245,42 @@ class SankofaBootstrap {
       if (deploy != null &&
           effectiveDeployOptions.autoCheckOnStartup &&
           !deploy.nativeUpdaterReady) {
+        // If boot-apply (tryApplyStagedKbcPatch, above) already transplanted a
+        // patch THIS launch, that patch's module URI is already loaded in this
+        // isolate. Calling fetchAndApplyKbcPatch would re-fetch the same patch
+        // and re-load the same URI → `Bad state: ... already loaded`, and the
+        // failure path then quarantines a perfectly good, live patch (it
+        // self-disables after two boots). A dynamic module can't be hot-swapped
+        // in a running isolate anyway, so when a patch is already live we only
+        // FETCH + STAGE any *newer* patch for the next cold boot (which
+        // boot-apply picks up) — never apply-now. On the first launch after a
+        // publish nothing is live yet (staged == null), so apply-now still gives
+        // same-boot delivery with no double-load.
+        final bool patchAlreadyLive = staged != null;
         unawaited(() async {
           try {
-            final result =
-                await deploy.fetchAndApplyKbcPatch(loader: options.loader!);
-            if (kDebugMode) {
-              debugPrint(
-                '[Sankofa.bootstrap] startup KBC check: '
-                'hasUpdate=${result.hasUpdate} label=${result.label ?? '-'}',
-              );
+            if (patchAlreadyLive) {
+              final current = await deploy.readCurrentPatch();
+              final check =
+                  await deploy.checkForUpdate(currentLabel: current?.label);
+              if (check.hasUpdate && check.update != null) {
+                await deploy.downloadUpdate(check.update!);
+                if (kDebugMode) {
+                  debugPrint(
+                    '[Sankofa.bootstrap] startup KBC stage-only: staged '
+                    '${check.update!.label} for next boot (patch already live)',
+                  );
+                }
+              }
+            } else {
+              final result =
+                  await deploy.fetchAndApplyKbcPatch(loader: options.loader!);
+              if (kDebugMode) {
+                debugPrint(
+                  '[Sankofa.bootstrap] startup KBC check: '
+                  'hasUpdate=${result.hasUpdate} label=${result.label ?? '-'}',
+                );
+              }
             }
           } catch (e) {
             // Non-fatal by contract — offline/airplane-mode launches are
