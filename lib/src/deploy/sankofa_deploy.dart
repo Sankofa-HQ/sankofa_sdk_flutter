@@ -594,6 +594,7 @@ class SankofaDeploy implements SankofaModule {
     String? distinctId,
     String? platform,
     String? currentLabel,
+    String? flavor,
     bool persistToDisk = true,
     Duration timeout = const Duration(seconds: 30),
   }) async {
@@ -613,6 +614,11 @@ class SankofaDeploy implements SankofaModule {
         loader: loader,
         platform: resolvedPlatform,
         currentLabel: currentLabel,
+        // Resolve the app's flavor (init arg → threaded _flavor →
+        // SANKOFA_FLAVOR dart-define) and scope the fetch by it, matching
+        // checkForUpdate. Closes the first-launch hole where a flavored app
+        // fetched+applied across flavors on its very first startup check.
+        flavor: _resolveFlavor(flavor),
         persistToDisk: persistToDisk,
         timeout: timeout,
         signingPubkeysB64: _effectiveSigningPubkeys,

@@ -363,6 +363,7 @@ Future<KbcFetchResult> fetchAndApplyKbcPatch({
   required KbcLoaderFn loader,
   String platform = 'ios',
   String? currentLabel,
+  String? flavor,
   bool persistToDisk = true,
   Duration timeout = const Duration(seconds: 30),
   String? signingPubkeyB64,
@@ -386,6 +387,12 @@ Future<KbcFetchResult> fetchAndApplyKbcPatch({
     // anyway — fail-closed — but this saves a B2 round-trip).
     'runtime': 'flutter-code',
     if (currentLabel != null) 'current_bundle_label': currentLabel,
+    // Flavor scopes the patch per product flavor. Parity with
+    // checkForKbcUpdate — WITHOUT this the first-launch apply-now path
+    // (SankofaBootstrap, staged == null) sent no flavor, so a fresh-install
+    // prod app could fetch+apply a dev-flavored patch. Empty = wildcard, so
+    // unflavored apps + legacy releases are unaffected.
+    if (flavor != null && flavor.isNotEmpty) 'flavor': flavor,
   };
   final checkUri = Uri.parse('$base/api/deploy/check')
       .replace(queryParameters: qp);
