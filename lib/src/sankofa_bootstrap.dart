@@ -256,42 +256,28 @@ class SankofaBootstrap {
       if (deploy != null &&
           effectiveDeployOptions.autoCheckOnStartup &&
           !deploy.nativeUpdaterReady) {
-        // If boot-apply (tryApplyStagedKbcPatch, above) already transplanted a
-        // patch THIS launch, that patch's module URI is already loaded in this
-        // isolate. Calling fetchAndApplyKbcPatch would re-fetch the same patch
-        // and re-load the same URI → `Bad state: ... already loaded`, and the
-        // failure path then quarantines a perfectly good, live patch (it
-        // self-disables after two boots). A dynamic module can't be hot-swapped
-        // in a running isolate anyway, so when a patch is already live we only
-        // FETCH + STAGE any *newer* patch for the next cold boot (which
-        // boot-apply picks up) — never apply-now. On the first launch after a
-        // publish nothing is live yet (staged == null), so apply-now still gives
-        // same-boot delivery with no double-load.
-        final bool patchAlreadyLive = staged != null;
+        // A dynamic module loads only ONCE per isolate, so a patch published
+        // while the app is already running can't be hot-swapped — it has to be
+        // written to active/ and applied on the NEXT cold boot. fetchAndApply-
+        // KbcPatch does exactly that: it PERSISTS the fetched patch to
+        // active/patch.skdp BEFORE attempting the load (kbc_fetch step 4), so
+        // even when the load no-ops this launch (a module is already live →
+        // kbc_loader treats "already loaded" as idempotent success, NO
+        // quarantine), the newest patch is promoted into active/ and boot-apply
+        // applies it next launch. That promotion is exactly what an
+        // already-installed app needs to receive the next published patch — a
+        // stage-only path that skipped this call left active/ stale and the app
+        // stuck on its current patch. Fire-and-forget so a slow network never
+        // blocks the first frame.
         unawaited(() async {
           try {
-            if (patchAlreadyLive) {
-              final current = await deploy.readCurrentPatch();
-              final check =
-                  await deploy.checkForUpdate(currentLabel: current?.label);
-              if (check.hasUpdate && check.update != null) {
-                await deploy.downloadUpdate(check.update!);
-                if (kDebugMode) {
-                  debugPrint(
-                    '[Sankofa.bootstrap] startup KBC stage-only: staged '
-                    '${check.update!.label} for next boot (patch already live)',
-                  );
-                }
-              }
-            } else {
-              final result =
-                  await deploy.fetchAndApplyKbcPatch(loader: options.loader!);
-              if (kDebugMode) {
-                debugPrint(
-                  '[Sankofa.bootstrap] startup KBC check: '
-                  'hasUpdate=${result.hasUpdate} label=${result.label ?? '-'}',
-                );
-              }
+            final result =
+                await deploy.fetchAndApplyKbcPatch(loader: options.loader!);
+            if (kDebugMode) {
+              debugPrint(
+                '[Sankofa.bootstrap] startup KBC check: '
+                'hasUpdate=${result.hasUpdate} label=${result.label ?? '-'}',
+              );
             }
           } catch (e) {
             // Non-fatal by contract — offline/airplane-mode launches are
