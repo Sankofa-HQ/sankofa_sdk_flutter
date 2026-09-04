@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.2.11 — Analytics identity safety + Deploy/CodePush hardening
+
+### Fixed
+- **Identity: switching users no longer merges two accounts.** `identify()` now
+  emits its anonymous→user alias ONLY when the previous id was the anonymous id.
+  Previously, calling `identify(newUser)` while a different user was still
+  identified (logging in another user without `reset()`) emitted an alias linking
+  the two real users, merging their analytics histories server-side. Switching
+  between identified users now just changes the active identity — no alias is
+  emitted. Always call `reset()` on logout to start a clean anonymous session.
+  (Mirrors the web SDK's behaviour.)
+
+### Deploy / CodePush
+- Flavor-aware OTA: the build flavor is read from `sankofa.yaml` at bootstrap and
+  sent on the fetch-and-apply path (closes a first-launch flavor leak).
+- KBC apply is idempotent — a live patch no longer self-quarantines on a
+  double-apply, and the rollback crash-guard now survives the crash it guards
+  (and an aborted apply).
+- On-device diagnostics: fetch/apply failures, the version-mismatch discard, and a
+  patch's return value (`patch_result.txt`) are reported on device in every build
+  mode; the last apply failure is persisted where it can be read.
+- Forked-engine builds with an unstamped Dart are no longer refused.
+
 ## 0.2.10 — Deploy: crash → auto-rollback boot-guard (Android)
 
 ### Fixed
