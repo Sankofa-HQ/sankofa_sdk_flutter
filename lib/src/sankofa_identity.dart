@@ -27,13 +27,20 @@ class SankofaIdentity {
   Future<void> identify(String userId, String sessionId, Future<void> Function(Map<String, dynamic> aliasEvent) onAlias) async {
     if (_userId == userId) return;
 
-    final previousId = distinctId;
+    // Only stitch an ANONYMOUS session onto the new user. If a DIFFERENT user is
+    // already identified (the app switched accounts without calling reset()),
+    // then previousId is that prior USER — aliasing previousId -> userId would
+    // merge two real accounts' histories. In that case we just switch the active
+    // identity and emit NO alias; call reset() on logout to begin a clean
+    // anonymous session. (Mirrors the web SDK's guard.)
+    final wasAnonymous = _userId == null;
+    final previousId = distinctId; // == _anonymousId when wasAnonymous
     _userId = userId;
 
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(kUserIdKey, userId);
 
-    if (previousId != userId) {
+    if (wasAnonymous && previousId != userId) {
       final aliasEvent = {
         'type': 'alias',
         'alias_id': previousId,
@@ -46,6 +53,8 @@ class SankofaIdentity {
       };
       await onAlias(aliasEvent);
       logger.log('🔗 Identify: Aliasing $previousId -> $userId');
+    } else if (!wasAnonymous) {
+      logger.log('🔀 Identify: switched $previousId -> $userId without aliasing (call reset() on logout to avoid merging accounts)');
     }
   }
 
